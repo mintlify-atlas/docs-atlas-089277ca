@@ -1,0 +1,284 @@
+---
+title: "Deploy CrowdSec on Kubernetes using the Helm chart"
+description: "Deploy CrowdSec on Kubernetes with the official Helm chart. Covers DaemonSet setup, pod log acquisition, and Traefik or Nginx ingress bouncer integration."
+---
+
+CrowdSec runs on Kubernetes as a DaemonSet, placing one security engine pod on every node so that every node's logs are monitored. The official Helm chart manages the DaemonSet, a central Local API deployment, RBAC resources, and bouncer integration in a single install. This guide covers installing CrowdSec via Helm, configuring log acquisition for your pods, and connecting an ingress bouncer.
+
+## Prerequisites
+
+- Kubernetes 1.22+
+- Helm 3.2+
+- `kubectl` access to the target cluster
+
+## Install with Helm
+
+<Steps>
+  <Step title="Add the CrowdSec Helm repository">
+    ```bash
+    helm repo add crowdsec https://crowdsecurity.github.io/helm-charts
+    helm repo update
+    ```
+  </Step>
+
+  <Step title="Create a values file">
+    Create a `values.yaml` to customise the deployment. At minimum, specify the collections you want to install:
+
+    ```yaml
+    # values.yaml
+    container_runtime: containerd   # or "docker" / "crio"
+
+    agent:
+      # Acquisition configs are mounted into each DaemonSet pod
+      acquisition:
+        - namespace: ingress-nginx
+          podName: ingress-nginx-controller-*
+          program: nginx
+
+      env:
+        - name: COLLECTIONS
+          value: "crowdsecurity/linux crowdsecurity/nginx"
+
+    lapi:
+      env:
+        - name: ENROLL_KEY
+          value: ""   # Optional: Console enrollment key
+        - name: DISABLE_ONLINE_API
+          value: "false"
+
+    # Pre-register a bouncer key for your ingress controller
+    secrets:
+      username: "your-lapi-username"
+      password: "your-lapi-password"
+    ```
+
+    <Note>
+      Set `container_runtime` to match your cluster's container runtime. Common values are `containerd`, `docker`, and `crio`. This controls which log path the DaemonSet reads pod logs from.
+    </Note>
+  </Step>
+
+  <Step title="Install the chart">
+    ```bash
+    helm install crowdsec crowdsec/crowdsec \
+      --namespace crowdsec \
+      --create-namespace \
+      -f values.yaml
+    ```
+
+    To upgrade an existing release:
+
+    ```bash
+    helm upgrade crowdsec crowdsec/crowdsec \
+      --namespace crowdsec \
+      -f values.yaml
+    ```
+  </Step>
+
+  <Step title="Verify the deployment">
+    ```bash
+    # Check that DaemonSet pods are running on all nodes
+    kubectl get pods -n crowdsec -o wide
+
+    # Check the Local API deployment
+    kubectl get deployment -n crowdsec
+
+    # View the CrowdSec engine logs
+    kubectl logs -n crowdsec -l app.kubernetes.io/name=crowdsec-agent
+
+    # Run cscli inside the LAPI pod
+    kubectl exec -n crowdsec deployment/crowdsec-lapi -- cscli version
+    kubectl exec -n crowdsec deployment/crowdsec-lapi -- cscli hub list
+    ```
+  </Step>
+</Steps>
+
+## Architecture
+
+The Helm chart deploys two workloads:
+
+| Workload | Kind | Purpose |
+|----------|------|---------|
+| `crowdsec-agent` | DaemonSet | Reads logs from each node and sends signals to the LAPI |
+| `crowdsec-lapi` | Deployment | Hosts the Local API, database, and Central API connection |
+
+Bouncers connect to the `crowdsec-lapi` service and query decisions via the REST API on port `8080`.
+
+## Configuring log acquisition for pods
+
+CrowdSec uses the `k8s-audit` and file datasources to ingest pod logs. The DaemonSet mounts the node's container log directory so that logs written by pods are accessible to the agent.
+
+Specify acquisition targets in your `values.yaml` under `agent.acquisition`:
+
+```yaml
+agent:
+  acquisition:
+    # Monitor all pods in the ingress-nginx namespace
+    - namespace: ingress-nginx
+      podName: ingress-nginx-controller-*
+      program: nginx
+
+    # Monitor a specific app
+    - namespace: production
+      podName: my-api-*
+      program: my-api
+
+    # Monitor kube-apiserver audit logs
+    - filenames:
+        - /var/log/kube-apiserver/audit.log
+      labels:
+        type: k8s-audit
+```
+
+Each entry maps a pod name pattern (glob) in a given namespace to a CrowdSec `program` label, which selects the correct parser (for example, the `crowdsecurity/nginx` parser for `program: nginx`).
+
+You can also provide raw acquisition YAML via a ConfigMap:
+
+```yaml
+# acquis.d/custom.yaml (mounted into the DaemonSet pods)
+source: file
+filenames:
+  - /var/log/containers/my-app-*.log
+labels:
+  type: my-app
+```
+
+## Kubernetes audit log acquisition
+
+To monitor the Kubernetes API server audit log, mount it into the DaemonSet and configure an acquisition entry:
+
+```yaml
+agent:
+  additionalVolumeMounts:
+    - name: audit-log
+      mountPath: /var/log/kube-apiserver
+      readOnly: true
+  additionalVolumes:
+    - name: audit-log
+      hostPath:
+        path: /var/log/kube-apiserver
+        type: DirectoryOrCreate
+  acquisition:
+    - filenames:
+        - /var/log/kube-apiserver/audit.log
+      labels:
+        type: k8s-audit
+```
+
+Install the `crowdsecurity/k8s-audit` collection to parse and detect threats in the audit log:
+
+```bash
+kubectl exec -n crowdsec deployment/crowdsec-lapi -- \
+  cscli collections install crowdsecurity/k8s-audit
+```
+
+## Ingress bouncer integration
+
+### Traefik
+
+The CrowdSec Traefik bouncer runs as a Traefik middleware plugin. Add the bouncer plugin to your Traefik installation and create a `Middleware` resource that routes decisions:
+
+```yaml
+# traefik-crowdsec-bouncer deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traefik-crowdsec-bouncer
+  namespace: crowdsec
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: traefik-crowdsec-bouncer
+  template:
+    metadata:
+      labels:
+        app: traefik-crowdsec-bouncer
+    spec:
+      containers:
+        - name: bouncer
+          image: fbonalair/traefik-crowdsec-bouncer:latest
+          env:
+            - name: CROWDSEC_BOUNCER_API_KEY
+              value: "your-bouncer-api-key"
+            - name: CROWDSEC_AGENT_HOST
+              value: "crowdsec-lapi.crowdsec.svc.cluster.local:8080"
+```
+
+Then define a Traefik `Middleware` to forward requests through the bouncer:
+
+```yaml
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: crowdsec-bouncer
+  namespace: ingress
+spec:
+  forwardAuth:
+    address: http://traefik-crowdsec-bouncer.crowdsec.svc.cluster.local:8080/api/v1/forwardAuth
+    trustForwardHeader: true
+```
+
+### Nginx ingress controller
+
+Use the `crowdsecurity/cs-nginx-bouncer` with the Nginx ingress controller by setting the `lua-resty-crowdsec` plugin via a `ConfigMap`:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-ingress-controller
+  namespace: ingress-nginx
+data:
+  plugins-configmap: crowdsec-lua-plugin
+```
+
+<Note>
+  Full Nginx ingress integration requires the `openresty` variant of the Nginx ingress controller. Refer to the [CrowdSec Nginx bouncer documentation](https://docs.crowdsec.net/u/bouncers/nginx) for complete configuration steps.
+</Note>
+
+## Register a bouncer API key
+
+Before a bouncer can connect to the Local API, you must register it:
+
+```bash
+# Generate a key for a new bouncer
+kubectl exec -n crowdsec deployment/crowdsec-lapi -- \
+  cscli bouncers add my-ingress-bouncer
+
+# List all registered bouncers
+kubectl exec -n crowdsec deployment/crowdsec-lapi -- \
+  cscli bouncers list
+```
+
+Store the generated key in a Kubernetes Secret and reference it in your bouncer deployment.
+
+## View alerts and decisions
+
+```bash
+# View recent alerts detected by the agents
+kubectl exec -n crowdsec deployment/crowdsec-lapi -- cscli alerts list
+
+# View active block decisions
+kubectl exec -n crowdsec deployment/crowdsec-lapi -- cscli decisions list
+
+# Add a manual ban
+kubectl exec -n crowdsec deployment/crowdsec-lapi -- \
+  cscli decisions add --ip 1.2.3.4 --duration 24h --reason "manual ban"
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Linux installation" icon="linux" href="/installation/linux">
+    Install CrowdSec directly on a Linux host with apt or dnf.
+  </Card>
+  <Card title="Docker installation" icon="docker" href="/installation/docker">
+    Run CrowdSec in a Docker container or Docker Compose stack.
+  </Card>
+  <Card title="Log acquisition" icon="file-lines" href="/configuration/acquisition">
+    Learn all available datasource types, including Kubernetes and Loki.
+  </Card>
+  <Card title="Bouncers" icon="shield" href="/remediation/bouncers">
+    Browse ingress, firewall, and application-layer remediation components.
+  </Card>
+</CardGroup>

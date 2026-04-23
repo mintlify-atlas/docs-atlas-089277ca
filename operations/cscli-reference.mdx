@@ -1,0 +1,580 @@
+---
+title: "cscli command reference: subcommands and global flags"
+description: "Complete reference for cscli, the CrowdSec management CLI for managing decisions, alerts, bouncers, hub items, and all aspects of your security engine."
+---
+
+`cscli` is the command-line interface for managing every aspect of your CrowdSec installation. It communicates with the Local API (LAPI) to query decisions, inspect alerts, manage bouncers and machines, install hub items, and gather diagnostic information. All subcommands share a common set of global flags that control configuration, output format, and logging verbosity.
+
+## Global flags
+
+These flags are available on every `cscli` command and subcommand.
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--config` | `-c` | `/etc/crowdsec/config.yaml` | Path to the CrowdSec config file |
+| `--output` | `-o` | `human` | Output format: `human`, `json`, or `raw` (CSV) |
+| `--color` | | `auto` | Colorize output: `yes`, `no`, or `auto` |
+| `--debug` | | `false` | Set log level to debug |
+| `--info` | | `false` | Set log level to info |
+| `--warning` | | `false` | Set log level to warning |
+| `--error` | | `false` | Set log level to error |
+| `--trace` | | `false` | Set log level to trace |
+
+```bash
+# Use a non-default config file
+cscli -c /etc/crowdsec/config-test.yaml decisions list
+
+# Output as JSON for scripting
+cscli -o json alerts list --ip 1.2.3.4
+```
+
+## Subcommand reference
+
+<AccordionGroup>
+
+<Accordion title="alerts — View and manage alerts">
+
+Alerts are created when a scenario threshold is triggered. They record the source IP, the scenario that fired, and any resulting decisions.
+
+**Subcommands**
+
+| Subcommand | Description |
+|---|---|
+| `list` | List alerts with optional filters |
+| `inspect <id>` | Show full details of a single alert |
+| `delete` | Delete alerts matching a filter |
+| `flush` | Remove old alerts from the database |
+
+**Common examples**
+
+```bash
+# List the last 50 alerts (default limit)
+cscli alerts list
+
+# Filter by source IP
+cscli alerts list --ip 1.2.3.4
+
+# Filter by CIDR range
+cscli alerts list --range 192.168.1.0/24
+
+# Filter by scenario
+cscli alerts list -s crowdsecurity/ssh-bf
+
+# Filter by decision type
+cscli alerts list --type ban
+
+# Include alerts from Central API (CAPI)
+cscli alerts list --all
+
+# Show detailed event info for alert 42
+cscli alerts inspect 42 --details
+
+# Delete all alerts for an IP
+cscli alerts delete --ip 1.2.3.4
+
+# Delete all alerts (use with care)
+cscli alerts delete --all
+
+# Flush alerts older than 7 days, keep at most 5000
+cscli alerts flush --max-age 7d --max-items 5000
+```
+
+**Key list flags**
+
+| Flag | Description |
+|---|---|
+| `-i / --ip` | Filter by source IP |
+| `-r / --range` | Filter by CIDR range |
+| `-s / --scenario` | Filter by scenario name |
+| `--type` | Filter by decision type (`ban`, `captcha`) |
+| `--since` | Only show alerts newer than duration (e.g. `4h`, `30d`) |
+| `--until` | Only show alerts older than duration |
+| `-a / --all` | Include CAPI decisions |
+| `-l / --limit` | Number of results (default 50, 0 = all) |
+| `-m / --machine` | Print which machine sent the alert |
+
+</Accordion>
+
+<Accordion title="decisions — Add, list, and delete active decisions">
+
+Decisions are the enforcement actions (ban, captcha, throttle) that bouncers act upon. You can manually add decisions and delete existing ones.
+
+**Subcommands**
+
+| Subcommand | Description |
+|---|---|
+| `list` | List active decisions from LAPI |
+| `add` | Manually add a decision |
+| `delete` | Delete decisions matching a filter |
+| `import` | Import decisions from a file |
+
+**Common examples**
+
+```bash
+# List all active decisions
+cscli decisions list
+
+# List decisions for a specific IP
+cscli decisions list -i 1.2.3.4
+
+# List decisions for a CIDR range
+cscli decisions list -r 10.0.0.0/8
+
+# List decisions from a specific scenario
+cscli decisions list -s crowdsecurity/http-bf
+
+# Ban an IP for 24 hours
+cscli decisions add --ip 1.2.3.4 --duration 24h --type ban
+
+# Add a captcha decision for a range
+cscli decisions add --range 1.2.3.0/24 --type captcha
+
+# Add a decision by scope (non-IP)
+cscli decisions add --scope username --value badactor --type ban
+
+# Delete a decision by IP
+cscli decisions delete -i 1.2.3.4
+
+# Delete a decision by ID
+cscli decisions delete --id 42
+
+# Delete all ban decisions
+cscli decisions delete --type ban --all
+```
+
+**`add` flags**
+
+| Flag | Description |
+|---|---|
+| `-i / --ip` | Source IP (shorthand for `--scope ip --value <IP>`) |
+| `-r / --range` | CIDR range |
+| `-d / --duration` | Duration (default `4h`) |
+| `-t / --type` | Decision type: `ban`, `captcha`, `throttle` |
+| `-R / --reason` | Human-readable reason |
+| `--scope` | Decision scope (default `ip`) |
+| `-B / --bypass-allowlist` | Add decision even if the value is in an allowlist |
+
+</Accordion>
+
+<Accordion title="bouncers — Manage remediation components">
+
+Bouncers are the enforcement layer that reads decisions from LAPI and applies them (firewall drops, HTTP challenges, etc.). This subcommand manages their API keys and lifecycle.
+
+<Note>
+This command requires direct database access and must be run on the same host as the Local API.
+</Note>
+
+**Subcommands**
+
+| Subcommand | Description |
+|---|---|
+| `list` | List registered bouncers |
+| `add <name>` | Register a new bouncer and print its API key |
+| `delete <name>` | Remove a bouncer registration |
+| `inspect <name>` | Show details for a bouncer |
+| `prune` | Remove bouncers that have not checked in recently |
+
+**Common examples**
+
+```bash
+# List all registered bouncers
+cscli bouncers list
+
+# Add a new bouncer (prints the API key once)
+cscli bouncers add my-nginx-bouncer
+
+# Inspect a bouncer
+cscli bouncers inspect my-nginx-bouncer
+
+# Remove a stale bouncer
+cscli bouncers delete my-old-bouncer
+
+# Prune bouncers that haven't connected in 60 days
+cscli bouncers prune --duration 60d
+```
+
+</Accordion>
+
+<Accordion title="machines — Manage CrowdSec agent registrations">
+
+Machines are CrowdSec agent instances that report events to LAPI. Use this subcommand to register, validate, and remove machines.
+
+<Note>
+This command requires direct database access and must be run on the same host as the Local API.
+</Note>
+
+**Subcommands**
+
+| Subcommand | Description |
+|---|---|
+| `list` | List registered machines |
+| `add <name>` | Register a new machine |
+| `delete <name>` | Remove a machine registration |
+| `inspect <name>` | Show details for a machine |
+| `validate <name>` | Validate (approve) a pending machine |
+| `prune` | Remove machines that have not checked in recently |
+
+```bash
+# List all machines
+cscli machines list
+
+# Validate a machine awaiting approval
+cscli machines validate my-agent
+
+# Remove a decommissioned machine
+cscli machines delete old-server
+```
+
+</Accordion>
+
+<Accordion title="hub — Manage the CrowdSec Hub (collections, parsers, scenarios)">
+
+The Hub is the central repository for CrowdSec content. The `hub` command provides a high-level view of installed and available items across all item types.
+
+**Subcommands**
+
+| Subcommand | Description |
+|---|---|
+| `list` | List all installed hub items and their status |
+| `update` | Refresh the hub index from GitHub |
+| `upgrade` | Upgrade all installed items to the latest version |
+
+```bash
+# Refresh hub index
+cscli hub update
+
+# List installed items and flag any that are out of date
+cscli hub list
+
+# Upgrade everything at once
+cscli hub upgrade
+```
+
+</Accordion>
+
+<Accordion title="collections — Install and manage collections">
+
+Collections bundle parsers, scenarios, and postoverflows for a specific log source or attack type.
+
+```bash
+# Install the nginx collection
+cscli collections install crowdsecurity/nginx
+
+# Install with dependencies resolved
+cscli collections install crowdsecurity/sshd
+
+# List installed collections
+cscli collections list
+
+# Upgrade all collections
+cscli collections upgrade --all
+
+# Remove a collection
+cscli collections remove crowdsecurity/nginx
+
+# Show details
+cscli collections inspect crowdsecurity/nginx
+```
+
+</Accordion>
+
+<Accordion title="parsers — Install and manage log parsers">
+
+Parsers transform raw log lines into normalized events that scenarios can evaluate.
+
+```bash
+# Install a parser
+cscli parsers install crowdsecurity/nginx-logs
+
+# List installed parsers
+cscli parsers list
+
+# Upgrade all parsers
+cscli parsers upgrade --all
+
+# Inspect a parser
+cscli parsers inspect crowdsecurity/nginx-logs
+```
+
+</Accordion>
+
+<Accordion title="scenarios — Install and manage detection scenarios">
+
+Scenarios define the detection logic. They consume normalized events and trigger alerts when thresholds are met.
+
+```bash
+# Install a scenario
+cscli scenarios install crowdsecurity/ssh-bf
+
+# List installed scenarios
+cscli scenarios list
+
+# Upgrade all scenarios
+cscli scenarios upgrade --all
+
+# Remove a scenario
+cscli scenarios remove crowdsecurity/ssh-bf
+```
+
+</Accordion>
+
+<Accordion title="postoverflows — Manage post-overflow parsers">
+
+Post-overflow parsers run after a bucket overflows (alert is triggered) and can enrich, filter, or re-label the alert.
+
+```bash
+cscli postoverflows install crowdsecurity/rdns
+cscli postoverflows list
+cscli postoverflows upgrade --all
+```
+
+</Accordion>
+
+<Accordion title="contexts — Manage context enrichment">
+
+Contexts add extra metadata to alerts (e.g. geo-location fields).
+
+```bash
+cscli contexts install crowdsecurity/bf_base_contexts
+cscli contexts list
+```
+
+</Accordion>
+
+<Accordion title="appsec-configs and appsec-rules — WAF management">
+
+These commands manage the Application Security (WAF) component, which inspects HTTP traffic.
+
+```bash
+# Install an AppSec configuration
+cscli appsec-configs install crowdsecurity/virtual-patching
+
+# Install AppSec rules
+cscli appsec-rules install crowdsecurity/vpatch-generic
+
+# List installed configs / rules
+cscli appsec-configs list
+cscli appsec-rules list
+```
+
+</Accordion>
+
+<Accordion title="metrics — Display Prometheus metrics">
+
+Fetch and display metrics from the CrowdSec Prometheus endpoint in a human-readable format.
+
+```bash
+# Show all metrics
+cscli metrics
+
+# Show only acquisition and parser metrics
+cscli metrics show acquisition parsers
+
+# Show an alias group (engine, lapi, appsec)
+cscli metrics show engine
+
+# List available metric types
+cscli metrics list
+
+# Connect to a remote LAPI
+cscli metrics --url http://lapi.host:6060/metrics
+```
+
+See [Metrics and Prometheus monitoring](/operations/metrics) for full details.
+
+</Accordion>
+
+<Accordion title="allowlists — Manage centralized allowlists">
+
+Allowlists prevent specific IPs or ranges from being blocked by any decision source.
+
+```bash
+# Create a new allowlist
+cscli allowlists create my_allowlist -d "Internal monitoring"
+
+# Add IPs to it
+cscli allowlists add my_allowlist 10.0.0.0/8 192.168.1.50
+
+# Check if an IP is allowlisted
+cscli allowlists check 10.0.0.5
+
+# List all allowlists
+cscli allowlists list
+
+# Inspect the contents of an allowlist
+cscli allowlists inspect my_allowlist
+
+# Remove specific entries
+cscli allowlists remove my_allowlist 192.168.1.50
+
+# Delete an allowlist entirely
+cscli allowlists delete my_allowlist
+```
+
+See [IP allowlists](/operations/allowlists) for full details.
+
+</Accordion>
+
+<Accordion title="explain — Test log lines against the parser pipeline">
+
+`cscli explain` runs a log line or file through CrowdSec parsers offline and shows which parsers matched or failed.
+
+```bash
+# Test a single log line
+cscli explain \
+  --log "Sep 19 18:33:22 host sshd[1234]: Failed password for root from 1.2.3.4 port 22 ssh2" \
+  --type syslog
+
+# Test a log file
+cscli explain --file /var/log/nginx/access.log --type nginx
+
+# Show verbose per-stage output
+cscli explain --file ./test.log --type nginx --verbose
+
+# Pipe lines from stdin
+tail -n 20 /var/log/auth.log | cscli explain --type syslog -f -
+```
+
+See [Troubleshooting CrowdSec issues](/operations/troubleshooting) for usage in debugging workflows.
+
+</Accordion>
+
+<Accordion title="support — Collect diagnostic information">
+
+`cscli support dump` gathers all relevant diagnostic data into a single zip archive for sharing with the CrowdSec team.
+
+```bash
+# Create a support bundle (saved to /tmp/crowdsec-support.zip by default)
+cscli support dump
+
+# Save to a custom path
+cscli support dump -f /tmp/my-support.zip
+
+# Fast mode: skip 30-second CPU profiling
+cscli support dump --fast
+```
+
+The bundle includes: version info, OS details, enabled feature flags, CrowdSec logs, hub item list, bouncers and machines, CAPI/LAPI status, config files (credentials redacted), Prometheus metrics, and crash dumps.
+
+</Accordion>
+
+<Accordion title="simulation — Toggle simulation mode">
+
+Simulation mode allows scenarios to run without creating real decisions — useful for testing new rules.
+
+```bash
+# Enable simulation mode for a scenario
+cscli simulation enable crowdsecurity/ssh-bf
+
+# Disable simulation mode
+cscli simulation disable crowdsecurity/ssh-bf
+
+# Show current simulation status
+cscli simulation status
+```
+
+</Accordion>
+
+<Accordion title="capi — Central API management">
+
+Manage connectivity to the CrowdSec Central API, which distributes the community blocklist.
+
+```bash
+# Check CAPI connectivity
+cscli capi status
+
+# Register this instance with CAPI
+cscli capi register
+```
+
+</Accordion>
+
+<Accordion title="lapi — Local API management">
+
+Manage the Local API server and machine credentials.
+
+```bash
+# Check LAPI connectivity from the agent
+cscli lapi status
+
+# Register the machine with LAPI (generates credentials)
+cscli lapi register
+
+# Re-generate machine credentials
+cscli lapi register --machine my-machine
+```
+
+</Accordion>
+
+<Accordion title="console — CrowdSec Console integration">
+
+Manage integration with the CrowdSec Console (app.crowdsec.net).
+
+```bash
+# Show current console configuration
+cscli console status
+
+# Enable console sharing of alerts
+cscli console enable alert
+```
+
+</Accordion>
+
+<Accordion title="notifications — Manage notification plugins">
+
+Configure and test notification plugins (Slack, email, Splunk, etc.) that fire when alerts are raised.
+
+```bash
+# List configured notification plugins
+cscli notifications list
+
+# Test a plugin
+cscli notifications test email_plugin
+
+# Reload notification config
+cscli notifications reinject -a 1
+```
+
+</Accordion>
+
+<Accordion title="hubtest — Test hub items offline">
+
+Run integration tests against parsers and scenarios using sample log files, without requiring a running CrowdSec instance.
+
+```bash
+# Run all tests
+cscli hubtest run --all
+
+# Run a specific test
+cscli hubtest run crowdsecurity/nginx
+
+# Create a new test case
+cscli hubtest create my-parser-test --type nginx
+```
+
+</Accordion>
+
+<Accordion title="config — Inspect and manipulate configuration">
+
+```bash
+# Show the merged configuration (all files combined)
+cscli config show
+
+# Backup current configuration
+cscli config backup /tmp/crowdsec-backup
+
+# Restore configuration from a backup
+cscli config restore /tmp/crowdsec-backup
+```
+
+</Accordion>
+
+<Accordion title="version — Print version information">
+
+```bash
+cscli version
+```
+
+</Accordion>
+
+</AccordionGroup>

@@ -1,0 +1,207 @@
+---
+title: "Scenarios: detect attack patterns with leaky buckets"
+description: "CrowdSec scenarios group parsed events into leaky buckets, raising alerts when thresholds are exceeded to detect brute-force, scan, and other attacks."
+---
+
+Scenarios are CrowdSec's detection engine. After parsers extract structured fields from raw logs, scenarios decide whether the resulting events represent malicious behavior. They work by pouring events into **leaky buckets** — time-windowed accumulators that overflow and raise an alert when a defined threshold is exceeded. Each bucket instance is tied to a `stackkey`, typically the source IP, so every attacker gets their own bucket that fills up independently.
+
+## The leaky bucket model
+
+Imagine a physical bucket with a hole in the bottom. Events (SSH failures, HTTP errors, etc.) pour into the bucket. The hole slowly drains events at a rate defined by `leakspeed`. If events arrive faster than they drain — meaning an attacker is hammering the service — the bucket fills up. When it overflows, CrowdSec raises an alert and the bucket is destroyed. A new bucket is created the next time an event arrives for that source.
+
+This model naturally handles bursty but non-malicious traffic: a single rapid burst fills the bucket, but if traffic then stops, events drain out before the threshold is hit.
+
+## Scenario YAML structure
+
+```yaml
+# type defines the bucket behavior. Options: leaky, trigger, counter, conditional, bayesian.
+type: leaky
+
+# name is used to tag alerts and for metrics.
+name: crowdsecurity/ssh-bf
+
+# description is shown in cscli and the Hub UI.
+description: "Detect ssh bruteforce"
+
+# filter is an expression evaluated against each parsed event.
+# Only matching events are poured into this bucket.
+filter: "evt.Meta.log_type == 'ssh_failed-auth'"
+
+# leakspeed is how long it takes for one event to drain from the bucket.
+leakspeed: "10s"
+
+# capacity is how many events the bucket holds before overflowing.
+capacity: 5
+
+# stackkey determines which bucket instance receives the event.
+# Events with the same stackkey value share a bucket.
+groupby: "evt.Meta.source_ip"
+
+# labels are attached to the alert and used by remediation components.
+labels:
+  service: ssh
+  type: bruteforce
+  remediation: true
+```
+
+### Key fields
+
+| Field | Required | Description |
+|---|---|---|
+| `type` | yes | Bucket behavior: `leaky`, `trigger`, `counter`, `conditional`, or `bayesian` |
+| `name` | yes | Unique identifier for this scenario |
+| `filter` | yes | Expression that must return `true` for an event to be poured |
+| `groupby` | yes | Expression whose value selects the bucket instance |
+| `capacity` | yes (most types) | Maximum number of events the bucket holds |
+| `leakspeed` | yes (leaky) | Duration for one event to drain (e.g., `"10s"`, `"1m"`) |
+| `labels` | optional | Key-value pairs attached to generated alerts |
+| `description` | optional | Human-readable description of what the scenario detects |
+
+## Bucket types
+
+<AccordionGroup>
+  <Accordion title="leaky — rate-based detection">
+    The default type. Events fill the bucket; the `leakspeed` rate drains them. When the bucket is full and a new event arrives, it overflows and raises an alert. Use this for detecting sustained attack rates like SSH brute force or HTTP credential stuffing.
+
+    ```yaml
+    type: leaky
+    leakspeed: "10s"
+    capacity: 5
+    ```
+
+    With these values, the bucket overflows if more than 5 failed logins arrive within a 50-second window (5 events × 10 seconds each).
+  </Accordion>
+
+  <Accordion title="trigger — single-event detection">
+    A trigger has `capacity: 0`. Any single event that matches the filter immediately overflows and raises an alert. Use this for detecting events that are always malicious on their own, such as a request to `/etc/passwd` or a known exploit path.
+
+    ```yaml
+    type: trigger
+    capacity: 0
+    filter: "evt.Parsed.http_path contains '/etc/passwd'"
+    ```
+  </Accordion>
+
+  <Accordion title="counter — time-window aggregation">
+    A counter accumulates events for a fixed `duration`, then overflows and emits a single aggregated alert. Capacity is set to `-1` (unlimited). Use this for periodic reporting — for example, counting unique destination ports scanned from a single IP over five minutes.
+
+    ```yaml
+    type: counter
+    capacity: -1
+    duration: 5m
+    filter: "evt.Meta.service == 'tcp'"
+    ```
+  </Accordion>
+
+  <Accordion title="conditional — expression-triggered overflow">
+    A conditional bucket evaluates a `conditional_overflow` expression on each pour. When the expression returns `true`, the bucket overflows. This gives you fine-grained control: you can overflow based on the content of accumulated events, not just their count.
+
+    ```yaml
+    type: conditional
+    capacity: -1
+    leakspeed: "1m"
+    conditional_overflow: "any(queue.Queue, {.Meta.http_status == '401'}) && len(queue.Queue) > 10"
+    ```
+  </Accordion>
+
+  <Accordion title="bayesian — probabilistic detection">
+    A Bayesian bucket runs Bayesian inference instead of counting events. You define conditions with `prob_given_evil` and `prob_given_benign` likelihoods. The bucket updates a posterior probability on each event. When the posterior exceeds `bayesian_threshold`, the bucket overflows. This is useful for detecting subtle multi-signal attacks that no single indicator makes obvious.
+
+    ```yaml
+    type: bayesian
+    capacity: -1
+    leakspeed: "1h"
+    bayesian_prior: 0.5
+    bayesian_threshold: 0.9
+    bayesian_conditions:
+      - condition: "evt.Meta.log_type == 'ssh_failed-auth'"
+        prob_given_evil: 0.8
+        prob_given_benign: 0.1
+      - condition: "evt.Meta.log_type == 'ssh_failed-auth' && evt.Parsed.source_user == 'root'"
+        prob_given_evil: 0.9
+        prob_given_benign: 0.02
+        guillotine: true
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Example scenarios
+
+### SSH brute force
+
+Raises an alert when more than 5 SSH authentication failures arrive from the same IP within a 50-second window:
+
+```yaml
+type: leaky
+name: crowdsecurity/ssh-bf
+description: "Detect ssh bruteforce"
+filter: "evt.Meta.log_type == 'ssh_failed-auth'"
+leakspeed: "10s"
+capacity: 5
+groupby: "evt.Meta.source_ip"
+labels:
+  service: ssh
+  type: bruteforce
+  remediation: true
+```
+
+### Web scan detection
+
+Counts distinct source IPs hitting HTTP 404 responses. After five minutes, if more than 15 unique paths were requested and returned 404, raises an alert:
+
+```yaml
+type: leaky
+name: crowdsecurity/http-scan-uniq-404
+description: "Detect web scans from a single IP"
+filter: "evt.Meta.http_status == '404'"
+leakspeed: "20s"
+capacity: 15
+groupby: "evt.Meta.source_ip"
+distinct: "evt.Parsed.request"
+labels:
+  service: http
+  type: scan
+  remediation: true
+```
+
+## Installing scenarios from the Hub
+
+```bash
+# Install a scenario
+cscli scenarios install crowdsecurity/ssh-bf
+
+# Install multiple scenarios at once
+cscli scenarios install crowdsecurity/ssh-bf crowdsecurity/http-probing
+
+# List installed scenarios
+cscli scenarios list
+
+# List all available scenarios (including not installed)
+cscli scenarios list -a
+
+# Remove a scenario
+cscli scenarios remove crowdsecurity/ssh-bf
+```
+
+## Simulation mode
+
+Simulation mode lets you test a scenario without actually banning IPs. When a scenario is in simulation mode, CrowdSec raises alerts normally but marks them as simulated — decisions are not forwarded to bouncers.
+
+```bash
+# Enable simulation for a scenario
+cscli simulation enable crowdsecurity/ssh-bf
+
+# Disable simulation
+cscli simulation disable crowdsecurity/ssh-bf
+
+# List all scenarios currently in simulation mode
+cscli simulation list
+```
+
+<Tip>
+Always enable simulation before deploying a new scenario in production. Monitor the alerts for false positives over a few days, then disable simulation when you are confident in the detection logic.
+</Tip>
+
+<Note>
+Scenarios that fire too broadly can block legitimate users. Use `groupby` on `source_ip` and tune `capacity` and `leakspeed` to match the expected legitimate request rate for the protected service.
+</Note>

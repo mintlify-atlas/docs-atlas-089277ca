@@ -1,0 +1,123 @@
+{
+  "projectType": "infrastructure",
+  "projectName": "CrowdSec",
+  "projectDescription": "An open-source, participative security engine combining IDS/IPS and WAF with crowdsourced threat intelligence to detect and block malicious IPs across your infrastructure.",
+  "theme": "aspen",
+  "primaryColor": "#f7a619",
+  "lightColor": "#f0e4ca",
+  "darkColor": "#514d90",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "concepts"
+            ]
+          },
+          {
+            "group": "Installation",
+            "pages": [
+              "installation/linux",
+              "installation/docker",
+              "installation/kubernetes",
+              "installation/windows"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/overview",
+              "configuration/acquisition",
+              "configuration/profiles",
+              "configuration/feature-flags"
+            ]
+          },
+          {
+            "group": "Detection",
+            "pages": [
+              "detection/parsers",
+              "detection/scenarios",
+              "detection/appsec-waf",
+              "detection/hub"
+            ]
+          },
+          {
+            "group": "Remediation & Notifications",
+            "pages": [
+              "remediation/bouncers",
+              "remediation/decisions",
+              "remediation/notifications"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/cscli-reference",
+              "operations/metrics",
+              "operations/allowlists",
+              "operations/troubleshooting"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Local API",
+            "pages": [
+              "api/overview",
+              "api/authentication",
+              "api/alerts",
+              "api/decisions",
+              "api/machines"
+            ]
+          },
+          {
+            "group": "Central API",
+            "pages": [
+              "api/capi-overview",
+              "api/community-blocklist"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Crowdsourced community blocklist of malicious IPs shared across all participants",
+    "Behavior-based detection engine using log analysis and leaky bucket scenarios",
+    "Application Security (AppSec/WAF) powered by Coraza for HTTP request inspection",
+    "Multi-source log acquisition: files, Docker, Kafka, CloudWatch, Syslog, Loki, S3, and more",
+    "Local API (LAPI) and Central API (CAPI) for distributed, multi-agent deployments",
+    "Plugin-based notification system supporting Slack, Splunk, email, HTTP, and Sentinel",
+    "Hub ecosystem for sharing parsers, scenarios, collections, and AppSec rules under MIT license",
+    "Cross-platform support: Linux, Windows, Docker, Kubernetes, and OPNsense"
+  ],
+  "publicApiSurface": [
+    "GET /v1/alerts — list security alerts",
+    "POST /v1/alerts — create new alerts",
+    "DELETE /v1/alerts — delete alerts by filter",
+    "GET /v1/decisions — list active decisions (bans)",
+    "POST /v1/decisions — create decisions",
+    "DELETE /v1/decisions — delete decisions",
+    "GET /v1/decisions/stream — stream decisions for bouncers",
+    "POST /v1/watchers/login — authenticate as a CrowdSec agent (machine)",
+    "POST /v1/bouncers/login — authenticate as a bouncer (remediation component)",
+    "GET /v1/heartbeat — agent heartbeat endpoint",
+    "GET /v1/allowlists — manage IP allowlists",
+    "cscli alerts — manage alerts via CLI",
+    "cscli decisions — manage bans/decisions via CLI",
+    "cscli bouncers — manage remediation components via CLI",
+    "cscli machines — manage registered agents via CLI",
+    "cscli hub — manage hub content (parsers, scenarios, collections)",
+    "cscli metrics — view engine metrics",
+    "cscli notifications — manage notification plugins",
+    "cscli appsec-rules / cscli appsec-configs — manage WAF rules"
+  ]
+}

@@ -1,0 +1,324 @@
+---
+title: "Alerts API: list, create, and delete security alerts"
+description: "Use the alerts endpoints to push detection events from agents, query them for investigation, and delete stale or false-positive alerts."
+---
+
+Alerts are the core detection events produced by the CrowdSec agent when a scenario fires. Each alert contains the triggering scenario, source information (IP, range, AS, geolocation), the raw events that led to the detection, and any decisions that were created as a result. Agents push alerts via `POST /v1/alerts`; operators and `cscli` read them via `GET /v1/alerts`. LAPI also forwards alerts to the Central API as signals if CAPI is configured.
+
+All alert endpoints require a valid JWT token in the `Authorization: Bearer <token>` header. See [Authentication](/api/authentication) for how to obtain one.
+
+---
+
+## POST /v1/alerts
+
+Push one or more alerts from a CrowdSec agent. LAPI evaluates the matching profiles, assigns decisions, and stores the alert.
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/alerts \
+  -H "Authorization: Bearer <jwt>" \
+  -H "Content-Type: application/json" \
+  -d '[
+    {
+      "scenario": "crowdsecurity/ssh-bf",
+      "scenario_hash": "abc123",
+      "scenario_version": "0.1",
+      "message": "5 ssh login failures from 1.2.3.4",
+      "events_count": 5,
+      "start_at": "2026-04-23T10:00:00Z",
+      "stop_at": "2026-04-23T10:01:00Z",
+      "capacity": 5,
+      "leakspeed": "10s",
+      "simulated": false,
+      "source": {
+        "scope": "Ip",
+        "value": "1.2.3.4",
+        "ip": "1.2.3.4"
+      },
+      "events": [],
+      "decisions": []
+    }
+  ]'
+```
+
+**Response `201 Created`:**
+
+```json
+["550e8400-e29b-41d4-a716-446655440000"]
+```
+
+The response is an array of alert UUIDs, one per submitted alert.
+
+### Request body fields
+
+<ResponseField name="scenario" type="string" required>
+  The name of the scenario that fired, e.g. `crowdsecurity/ssh-bf`.
+</ResponseField>
+
+<ResponseField name="scenario_hash" type="string" required>
+  Hash of the scenario file. Used by CAPI to verify scenario integrity.
+</ResponseField>
+
+<ResponseField name="scenario_version" type="string" required>
+  Version of the scenario, e.g. `0.1`.
+</ResponseField>
+
+<ResponseField name="message" type="string" required>
+  Human-readable description of the alert.
+</ResponseField>
+
+<ResponseField name="events_count" type="integer" required>
+  Number of events that triggered the scenario.
+</ResponseField>
+
+<ResponseField name="start_at" type="string" required>
+  RFC 3339 timestamp of the first event in the alert window.
+</ResponseField>
+
+<ResponseField name="stop_at" type="string" required>
+  RFC 3339 timestamp of the last event in the alert window.
+</ResponseField>
+
+<ResponseField name="capacity" type="integer" required>
+  The bucket capacity of the scenario (leaky bucket parameter).
+</ResponseField>
+
+<ResponseField name="leakspeed" type="string" required>
+  The leakspeed of the scenario bucket, e.g. `10s`.
+</ResponseField>
+
+<ResponseField name="simulated" type="boolean" required>
+  If `true`, the alert is in simulation mode and decisions will not be enforced.
+</ResponseField>
+
+<ResponseField name="source" type="object" required>
+  The source of the suspicious activity.
+  <Expandable title="source fields">
+    <ResponseField name="scope" type="string" required>
+      The scope of the source: `Ip`, `Range`, `Username`, etc.
+    </ResponseField>
+    <ResponseField name="value" type="string" required>
+      The value matching the scope, e.g. `1.2.3.4` or `10.0.0.0/24`.
+    </ResponseField>
+    <ResponseField name="ip" type="string">
+      IP address of the source (when scope is `Ip`).
+    </ResponseField>
+    <ResponseField name="range" type="string">
+      CIDR range (when scope is `Range`).
+    </ResponseField>
+    <ResponseField name="as_number" type="string">
+      Autonomous system number.
+    </ResponseField>
+    <ResponseField name="as_name" type="string">
+      Autonomous system name.
+    </ResponseField>
+    <ResponseField name="cn" type="string">
+      ISO 3166-1 alpha-2 country code.
+    </ResponseField>
+    <ResponseField name="latitude" type="number">
+      Geolocation latitude.
+    </ResponseField>
+    <ResponseField name="longitude" type="number">
+      Geolocation longitude.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="events" type="array" required>
+  Array of raw event objects. Each event has a `timestamp` and a `meta` array of key-value pairs.
+</ResponseField>
+
+<ResponseField name="decisions" type="array">
+  Pre-computed decisions (e.g. from `cscli decisions add`). If provided, LAPI skips profile evaluation and uses these decisions directly.
+</ResponseField>
+
+---
+
+## GET /v1/alerts
+
+Search and list alerts stored in LAPI.
+
+```bash
+curl http://127.0.0.1:8080/v1/alerts \
+  -H "Authorization: Bearer <jwt>"
+```
+
+### Query parameters
+
+<ParamField query="ip" type="string">
+  Filter alerts where the source IP matches exactly. Shorthand for `scope=Ip&value=<ip>`.
+</ParamField>
+
+<ParamField query="range" type="string">
+  Filter alerts where the source falls within this CIDR range. Shorthand for `scope=Range&value=<cidr>`.
+</ParamField>
+
+<ParamField query="scope" type="string">
+  Filter alerts by source scope: `Ip`, `Range`, `Username`, `Session`, etc.
+</ParamField>
+
+<ParamField query="value" type="string">
+  Filter alerts by the source value. Use together with `scope`.
+</ParamField>
+
+<ParamField query="scenario" type="string">
+  Filter alerts triggered by a specific scenario name.
+</ParamField>
+
+<ParamField query="since" type="string">
+  Return alerts created after this date-time (RFC 3339 or Go duration like `1h30m`).
+</ParamField>
+
+<ParamField query="until" type="string">
+  Return alerts created before this date-time.
+</ParamField>
+
+<ParamField query="simulated" type="boolean">
+  When `true`, include alerts from simulated scenarios.
+</ParamField>
+
+<ParamField query="has_active_decision" type="boolean">
+  When `true`, return only alerts that still have at least one active (non-expired) decision.
+</ParamField>
+
+<ParamField query="decision_type" type="string">
+  Filter by decision type: `ban`, `captcha`, or a custom type.
+</ParamField>
+
+<ParamField query="limit" type="integer">
+  Maximum number of alerts to return.
+</ParamField>
+
+<ParamField query="offset" type="integer">
+  Number of alerts to skip (for pagination).
+</ParamField>
+
+**Example — find all SSH brute-force alerts from the last hour:**
+
+```bash
+curl "http://127.0.0.1:8080/v1/alerts?scenario=crowdsecurity/ssh-bf&since=1h" \
+  -H "Authorization: Bearer <jwt>"
+```
+
+**Response `200 OK`:** an array of alert objects.
+
+---
+
+## GET /v1/alerts/{alert_id}
+
+Fetch a single alert by its numeric ID.
+
+```bash
+curl http://127.0.0.1:8080/v1/alerts/42 \
+  -H "Authorization: Bearer <jwt>"
+```
+
+**Response `200 OK`:**
+
+```json
+{
+  "id": 42,
+  "uuid": "550e8400-e29b-41d4-a716-446655440000",
+  "machine_id": "my-crowdsec-agent",
+  "created_at": "2026-04-23T10:01:05Z",
+  "scenario": "crowdsecurity/ssh-bf",
+  "scenario_version": "0.1",
+  "scenario_hash": "abc123",
+  "message": "5 ssh login failures from 1.2.3.4",
+  "events_count": 5,
+  "start_at": "2026-04-23T10:00:00Z",
+  "stop_at": "2026-04-23T10:01:00Z",
+  "capacity": 5,
+  "leakspeed": "10s",
+  "simulated": false,
+  "remediation": true,
+  "source": {
+    "scope": "Ip",
+    "value": "1.2.3.4",
+    "ip": "1.2.3.4",
+    "cn": "US",
+    "as_number": "15169",
+    "as_name": "GOOGLE"
+  },
+  "decisions": [
+    {
+      "id": 7,
+      "duration": "3h59m55s",
+      "scenario": "crowdsecurity/ssh-bf",
+      "scope": "Ip",
+      "type": "ban",
+      "value": "1.2.3.4",
+      "origin": "crowdsec"
+    }
+  ],
+  "events": [],
+  "meta": []
+}
+```
+
+---
+
+## DELETE /v1/alerts
+
+Bulk-delete alerts matching the provided filters. This endpoint is restricted to loopback and trusted IP addresses.
+
+```bash
+curl -X DELETE "http://127.0.0.1:8080/v1/alerts?scenario=crowdsecurity/ssh-bf&until=24h" \
+  -H "Authorization: Bearer <jwt>"
+```
+
+The same filter parameters as `GET /v1/alerts` are accepted (`ip`, `range`, `scenario`, `since`, `until`, `scope`, `value`, `simulated`, `has_active_decision`).
+
+**Response `200 OK`:**
+
+```json
+{ "nb_deleted": "12" }
+```
+
+<Warning>
+  This endpoint checks that the request comes from `127.0.0.1`, `::1`, a Unix socket, or a configured trusted IP. Requests from other addresses receive `403 Forbidden`.
+</Warning>
+
+---
+
+## DELETE /v1/alerts/{alert_id}
+
+Delete a single alert by its numeric ID. Subject to the same IP trust restriction as bulk delete.
+
+```bash
+curl -X DELETE http://127.0.0.1:8080/v1/alerts/42 \
+  -H "Authorization: Bearer <jwt>"
+```
+
+**Response `200 OK`:**
+
+```json
+{ "nb_deleted": "1" }
+```
+
+---
+
+## Alert object reference
+
+<ResponseField name="id" type="integer">
+  Unique numeric ID assigned by LAPI (read-only).
+</ResponseField>
+
+<ResponseField name="uuid" type="string">
+  UUID assigned by LAPI (read-only).
+</ResponseField>
+
+<ResponseField name="machine_id" type="string">
+  ID of the agent that pushed the alert (read-only).
+</ResponseField>
+
+<ResponseField name="created_at" type="string">
+  RFC 3339 timestamp when LAPI stored the alert (read-only).
+</ResponseField>
+
+<ResponseField name="kind" type="string">
+  Origin of the alert: `crowdsec`, `waf`, `bot-detection`, or empty for agent-pushed alerts.
+</ResponseField>
+
+<ResponseField name="remediation" type="boolean">
+  Whether at least one decision was created for this alert.
+</ResponseField>

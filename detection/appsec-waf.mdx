@@ -1,0 +1,198 @@
+---
+title: "CrowdSec AppSec WAF: block web attacks with Coraza"
+description: "The CrowdSec AppSec component inspects HTTP requests in real time using Coraza, blocking SQLi, XSS, and path traversal before they reach your application."
+---
+
+The AppSec (Application Security) component extends CrowdSec beyond log-based detection to real-time HTTP inspection. It sits in the data acquisition pipeline as a special source type and evaluates HTTP requests — headers, paths, query strings, and bodies — against a library of rules powered by the [Coraza](https://coraza.io) WAF engine. When a rule matches, AppSec can block the request immediately (in-band) or raise a CrowdSec alert for post-processing (out-of-band), and it integrates with the same bouncer remediation system that handles all other CrowdSec decisions.
+
+## How AppSec fits in the pipeline
+
+```
+Reverse proxy / application
+         │
+         │  HTTP request forwarded to CrowdSec AppSec listener
+         ▼
+┌─────────────────────────┐
+│  AppSec acquisition      │  Receives forwarded requests via HTTP
+│  (acquis.yaml source)    │
+└────────────┬────────────┘
+             │
+             ▼
+┌─────────────────────────┐
+│  appsec-config           │  Loads rule sets; defines in-band and
+│                          │  out-of-band rule phases and hooks
+└────────────┬────────────┘
+             │
+             ▼
+┌─────────────────────────┐
+│  appsec-rules            │  Coraza/ModSecurity rule collections
+│  (hub items)             │  evaluated against each request
+└────────────┬────────────┘
+             │
+     ┌───────┴──────────┐
+     │                  │
+  In-band           Out-of-band
+  (block now)       (alert + analyze)
+```
+
+**In-band** rules evaluate synchronously. If a rule matches, AppSec returns a block response to the reverse proxy before the request reaches your application.
+
+**Out-of-band** rules evaluate after the response is sent. They are used for detection and alerting without impacting request latency.
+
+## Configuration: appsec-config
+
+An `appsec-config` file declares which rule sets to load and configures the AppSec engine's behavior. Install configs from the Hub or write your own:
+
+```yaml
+name: crowdsecurity/virtual-patching
+
+# inband_rules and outofband_rules reference installed appsec-rule items.
+inband_rules:
+  - crowdsecurity/base-config
+  - crowdsecurity/vpatch-*
+
+outofband_rules:
+  - crowdsecurity/crs
+
+# default_remediation controls what happens when an in-band rule matches.
+# Options: ban, captcha, allow
+default_remediation: ban
+
+# HTTP status codes sent to the bouncer and to the end user.
+blocked_http_code: 403
+user_blocked_http_code: 403
+passed_http_code: 200
+
+# on_load hooks run once when the config is loaded, not per-request.
+on_load:
+  - filter: "IsInBand == true"
+    apply:
+      - "SetRemediationByTag('crowdsecurity/dos', 'captcha')"
+
+# on_match hooks run when a rule matches. Use them to customize the response.
+on_match:
+  - filter: "evt.Meta.appsec_rule_id == '930100'"
+    apply:
+      - "SetRemediation('captcha')"
+```
+
+### Phase-scoped hooks
+
+Hooks give you fine-grained control over what happens at each stage of request evaluation. There are four hook stages:
+
+| Hook | When it runs |
+|---|---|
+| `on_load` | Once at startup when the config is loaded |
+| `pre_eval` | Before rules are evaluated for each request |
+| `post_eval` | After rules are evaluated, before the response is sent |
+| `on_match` | When at least one rule matches |
+
+You can scope hooks to `inband` or `outofband` phases, or define them at the top level to run in both phases.
+
+## Configuration: appsec-rules
+
+`appsec-rules` are the individual Coraza/ModSecurity rule files. They are installed from the Hub and referenced by name in your `appsec-config`. You do not typically write these by hand — the Hub provides maintained rule sets covering OWASP CRS, virtual patching, and CVE-specific rules.
+
+## Enabling AppSec
+
+<Steps>
+  <Step title="Install an appsec-config and rules from the Hub">
+    The `crowdsecurity/appsec-virtual-patching` collection bundles a ready-to-use config and a curated set of virtual-patching rules:
+
+    ```bash
+    # Update the hub index first
+    cscli hub update
+
+    # Install the appsec config
+    cscli appsec-configs install crowdsecurity/virtual-patching
+
+    # Install rule sets
+    cscli appsec-rules install crowdsecurity/base-config
+    cscli appsec-rules install crowdsecurity/vpatch-generic
+
+    # Or install a collection that includes everything
+    cscli collections install crowdsecurity/appsec-virtual-patching
+    ```
+  </Step>
+
+  <Step title="Add an AppSec acquisition source">
+    Edit your `/etc/crowdsec/acquis.yaml` (or add a new file in `acquis.d/`) to define the AppSec listener. This tells CrowdSec to start an HTTP server that your reverse proxy will forward requests to:
+
+    ```yaml
+    listen_addr: 127.0.0.1:7422
+    appsec_config: crowdsecurity/virtual-patching
+    name: myapp-appsec
+    source: appsec
+    labels:
+      type: appsec
+    ```
+
+    The `source: appsec` field is what activates the AppSec component. `appsec_config` names the installed `appsec-config` item to use.
+  </Step>
+
+  <Step title="Configure your reverse proxy to forward requests">
+    Point your reverse proxy at the AppSec listener. For Nginx with the CrowdSec Nginx bouncer:
+
+    ```nginx
+    server {
+        location / {
+            # Forward the request to AppSec for inspection before proxying.
+            access_by_lua_block {
+                local cs = require "crowdsec"
+                cs.Allow(ngx.var.remote_addr)
+            }
+            proxy_pass http://backend;
+        }
+    }
+    ```
+
+    The exact configuration depends on which bouncer you use. See the bouncer documentation for your specific reverse proxy.
+  </Step>
+
+  <Step title="Reload CrowdSec and verify">
+    ```bash
+    sudo systemctl reload crowdsec
+
+    # Confirm AppSec is running
+    cscli appsec-configs list
+    cscli appsec-rules list
+    ```
+
+    Send a test request with a known-bad payload to verify blocking works:
+
+    ```bash
+    curl -i "http://your-site.example.com/?id=1%20UNION%20SELECT%201,2,3--"
+    # Expect: HTTP 403 Forbidden
+    ```
+  </Step>
+</Steps>
+
+## Managing AppSec content
+
+```bash
+# List installed appsec-configs
+cscli appsec-configs list
+
+# List all available appsec-configs (including not installed)
+cscli appsec-configs list -a
+
+# Install an appsec-config
+cscli appsec-configs install crowdsecurity/virtual-patching
+
+# List installed appsec-rules
+cscli appsec-rules list
+
+# Install an appsec-rule
+cscli appsec-rules install crowdsecurity/crs
+
+# Remove an appsec-rule
+cscli appsec-rules remove crowdsecurity/crs
+```
+
+<Warning>
+In-band rules block requests synchronously, so misconfigured rules can cause false positives that break legitimate traffic. Test new rule sets with `default_remediation: allow` and monitor the alerts before switching to `ban`.
+</Warning>
+
+<Note>
+AppSec requires a reverse proxy or load balancer that can forward HTTP requests to CrowdSec's AppSec listener. CrowdSec itself does not terminate TLS or act as a proxy — it only inspects forwarded requests.
+</Note>

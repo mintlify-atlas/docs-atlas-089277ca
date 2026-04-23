@@ -1,0 +1,243 @@
+---
+title: "Run CrowdSec with Docker: setup and bouncer config"
+description: "Run the CrowdSec security engine as a Docker container. Covers docker run, Docker Compose, environment variables, volume mounts, and connecting bouncers."
+---
+
+CrowdSec publishes an official Docker image that packages the security engine and `cscli` into a single container. Running CrowdSec in Docker is the fastest way to get started on any platform that supports containers, and it fits naturally into existing Compose-based stacks where CrowdSec can monitor other containers' log output directly through the Docker socket.
+
+## Prerequisites
+
+- Docker Engine 20.10+ (or Docker Desktop)
+- For Docker Compose: Compose plugin v2 or the standalone `docker-compose` v1.29+
+
+## Quick start
+
+<CodeGroup>
+
+```bash docker run
+docker run -d \
+  --name crowdsec \
+  -e COLLECTIONS="crowdsecurity/linux crowdsecurity/nginx" \
+  -v /var/log:/var/log:ro \
+  -v /etc/crowdsec:/etc/crowdsec \
+  -v /var/lib/crowdsec/data:/var/lib/crowdsec/data \
+  crowdsecurity/crowdsec:latest
+```
+
+```yaml docker-compose.yml
+services:
+  crowdsec:
+    image: crowdsecurity/crowdsec:latest
+    container_name: crowdsec
+    restart: unless-stopped
+    environment:
+      COLLECTIONS: "crowdsecurity/linux crowdsecurity/nginx"
+      GID: "${GID:-1000}"
+    volumes:
+      - /var/log:/var/log:ro
+      - crowdsec-config:/etc/crowdsec
+      - crowdsec-data:/var/lib/crowdsec/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "8080:8080"   # Local API
+      - "6060:6060"   # Prometheus metrics
+
+volumes:
+  crowdsec-config:
+  crowdsec-data:
+```
+
+</CodeGroup>
+
+## Environment variables
+
+The CrowdSec Docker image is configured through environment variables rather than by editing config files directly.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `COLLECTIONS` | Space-separated list of hub collections to install on first start | — |
+| `PARSERS` | Space-separated list of additional parsers to install | — |
+| `SCENARIOS` | Space-separated list of additional scenarios to install | — |
+| `POSTOVERFLOWS` | Space-separated list of postoverflow configs to install | — |
+| `BOUNCER_KEY_<name>` | Pre-register a bouncer API key with the given name | — |
+| `DISABLE_ONLINE_API` | Set to `true` to run fully offline (no Central API) | `false` |
+| `ENROLL_KEY` | Console enrollment key to link this instance to the CrowdSec Console | — |
+| `ENROLL_INSTANCE_NAME` | Human-readable name for this instance in the Console | — |
+| `GID` | GID used to access the Docker socket | `1000` |
+| `LEVEL_TRACE` | Set to `true` for trace-level logging | `false` |
+| `LEVEL_DEBUG` | Set to `true` for debug-level logging | `false` |
+| `LEVEL_INFO` | Set to `true` for info-level logging (default) | `true` |
+
+## Volume mounts
+
+CrowdSec requires three types of persistent storage and optionally access to host logs and the Docker socket.
+
+```yaml
+volumes:
+  # Persist configuration across container restarts
+  - /etc/crowdsec:/etc/crowdsec
+
+  # Persist the SQLite database and hub content
+  - /var/lib/crowdsec/data:/var/lib/crowdsec/data
+
+  # Read host log files for analysis
+  - /var/log:/var/log:ro
+
+  # Monitor other containers via the Docker datasource
+  - /var/run/docker.sock:/var/run/docker.sock:ro
+```
+
+<Note>
+  Mount log directories as read-only (`:ro`) wherever possible. CrowdSec only needs to read log files, not write to them.
+</Note>
+
+## Monitoring other containers
+
+When you mount the Docker socket, CrowdSec can tail the log output of other containers using the Docker datasource. Add an acquisition configuration to `/etc/crowdsec/acquis.d/docker.yaml`:
+
+```yaml
+source: docker
+container_name:
+  - nginx
+  - traefik
+  - my-app
+labels:
+  type: nginx
+```
+
+CrowdSec will follow the stdout/stderr of the listed containers and apply the configured parsers and scenarios.
+
+## Connecting bouncers
+
+Bouncers (remediation components) connect to the CrowdSec Local API to receive decisions. You can pre-register a bouncer API key using the `BOUNCER_KEY_<name>` environment variable:
+
+```yaml
+services:
+  crowdsec:
+    image: crowdsecurity/crowdsec:latest
+    environment:
+      BOUNCER_KEY_firewall: "my-secret-bouncer-key"
+    # ...
+
+  cs-firewall-bouncer:
+    image: crowdsecurity/cs-firewall-bouncer:latest
+    environment:
+      BOUNCER_KEY: "my-secret-bouncer-key"
+      CROWDSEC_LAPI_URL: "http://crowdsec:8080"
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      - crowdsec
+```
+
+<Warning>
+  The firewall bouncer requires host networking (`network_mode: host`) and the `NET_ADMIN` capability to manage iptables or nftables rules on the host network stack.
+</Warning>
+
+Alternatively, generate a bouncer API key after the container is running:
+
+```bash
+docker exec crowdsec cscli bouncers add my-bouncer
+```
+
+## Full Compose example with Nginx and a bouncer
+
+```yaml
+services:
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - nginx-logs:/var/log/nginx
+
+  crowdsec:
+    image: crowdsecurity/crowdsec:latest
+    restart: unless-stopped
+    environment:
+      COLLECTIONS: "crowdsecurity/nginx crowdsecurity/linux"
+      BOUNCER_KEY_nginx: "change-me-to-a-random-secret"
+    volumes:
+      - crowdsec-config:/etc/crowdsec
+      - crowdsec-data:/var/lib/crowdsec/data
+      - nginx-logs:/var/log/nginx:ro
+    depends_on:
+      - nginx
+
+  cs-nginx-bouncer:
+    image: crowdsecurity/cs-nginx-bouncer:latest
+    environment:
+      API_KEY: "change-me-to-a-random-secret"
+      CROWDSEC_LAPI_URL: "http://crowdsec:8080"
+    depends_on:
+      - crowdsec
+
+volumes:
+  nginx-logs:
+  crowdsec-config:
+  crowdsec-data:
+```
+
+## Verify the container is working
+
+```bash
+# Check the running service version
+docker exec crowdsec cscli version
+
+# List installed hub items
+docker exec crowdsec cscli hub list
+
+# View recent alerts
+docker exec crowdsec cscli alerts list
+
+# View active decisions
+docker exec crowdsec cscli decisions list
+
+# View registered bouncers
+docker exec crowdsec cscli bouncers list
+```
+
+## Prometheus metrics
+
+CrowdSec exposes Prometheus metrics on port `6060` by default. You can scrape this endpoint with a Prometheus instance:
+
+```yaml
+# prometheus.yml scrape config
+scrape_configs:
+  - job_name: crowdsec
+    static_configs:
+      - targets: ['crowdsec:6060']
+```
+
+The metrics endpoint is controlled by `config.yaml`:
+
+```yaml
+prometheus:
+  enabled: true
+  level: full
+  listen_addr: 127.0.0.1
+  listen_port: 6060
+```
+
+<Tip>
+  When running in Docker, set `listen_addr: 0.0.0.0` in your mounted `config.yaml` (or override via environment) so that Prometheus can reach the metrics endpoint from outside the container.
+</Tip>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Kubernetes deployment" icon="dharmachakra" href="/installation/kubernetes">
+    Run CrowdSec as a DaemonSet across a Kubernetes cluster with Helm.
+  </Card>
+  <Card title="Log acquisition" icon="file-lines" href="/configuration/acquisition">
+    Configure which log sources and Docker containers CrowdSec monitors.
+  </Card>
+  <Card title="Bouncers" icon="shield" href="/remediation/bouncers">
+    Browse available remediation components for Nginx, Traefik, firewall, and more.
+  </Card>
+  <Card title="CrowdSec Console" icon="chart-line" href="https://app.crowdsec.net">
+    Connect your instance to the Console for centralized visibility and management.
+  </Card>
+</CardGroup>

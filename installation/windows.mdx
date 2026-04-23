@@ -1,0 +1,243 @@
+---
+title: "Install CrowdSec on Windows: MSI and service setup"
+description: "Install CrowdSec on Windows via MSI or manual service registration. Covers service management, Event Log acquisition, and key path differences from Linux."
+---
+
+CrowdSec supports Windows and runs as a native Windows Service, managed through the Service Control Manager (SCM). The recommended installation method is the MSI installer, which places all binaries, configuration files, and the service registration in the correct locations automatically. You can also install and manage the service manually using `crowdsec.exe` CLI flags backed by the `golang.org/x/sys/windows/svc/mgr` Windows service API.
+
+## Prerequisites
+
+- Windows 10 / Windows Server 2016 or later (64-bit)
+- Administrator privileges for installation and service management
+- PowerShell 5.1+ (included with Windows 10 and Server 2016)
+
+## Install with the MSI installer
+
+<Steps>
+  <Step title="Download the installer">
+    Download the latest `crowdsec_windows_amd64.msi` from the [CrowdSec GitHub releases page](https://github.com/crowdsecurity/crowdsec/releases/latest).
+
+    You can also download it with PowerShell:
+
+    ```powershell
+    $version = (Invoke-RestMethod https://api.github.com/repos/crowdsecurity/crowdsec/releases/latest).tag_name
+    $url = "https://github.com/crowdsecurity/crowdsec/releases/download/$version/crowdsec_windows_amd64.msi"
+    Invoke-WebRequest -Uri $url -OutFile "crowdsec_windows_amd64.msi"
+    ```
+  </Step>
+
+  <Step title="Run the installer">
+    Double-click the MSI file or run it silently from an elevated PowerShell prompt:
+
+    ```powershell
+    msiexec /i crowdsec_windows_amd64.msi /quiet /norestart
+    ```
+
+    The installer places files in the following locations:
+
+    | Path | Purpose |
+    |------|---------|
+    | `C:\Program Files\CrowdSec\crowdsec.exe` | Security engine binary |
+    | `C:\Program Files\CrowdSec\cscli.exe` | CLI management tool |
+    | `C:\ProgramData\CrowdSec\config\` | Configuration files |
+    | `C:\ProgramData\CrowdSec\data\` | Database and hub content |
+    | `C:\ProgramData\CrowdSec\log\` | Log files |
+
+    <Note>
+      On Windows, the config and data directories are under `C:\ProgramData\CrowdSec\` rather than `/etc/crowdsec/` and `/var/lib/crowdsec/data/` as on Linux. Adjust any documentation or scripts that reference Linux paths.
+    </Note>
+  </Step>
+
+  <Step title="Complete the setup wizard">
+    The installer launches the CrowdSec setup wizard, which:
+
+    - Generates Local API credentials and registers the machine
+    - Registers with the Central API (CrowdSec community blocklist)
+    - Runs `cscli setup unattended` to detect running services and configure log acquisition
+    - Registers and starts the `crowdsec` Windows Service
+
+    If you are running in a non-interactive environment, the MSI installer accepts properties to skip the wizard:
+
+    ```powershell
+    msiexec /i crowdsec_windows_amd64.msi /quiet `
+      LAPI=1 `
+      CAPI=1
+    ```
+  </Step>
+
+  <Step title="Verify the service is running">
+    ```powershell
+    Get-Service -Name crowdsec
+
+    # Expected output:
+    # Status   Name               DisplayName
+    # ------   ----               -----------
+    # Running  crowdsec           crowdsec
+    ```
+
+    Then confirm with `cscli`:
+
+    ```powershell
+    & "C:\Program Files\CrowdSec\cscli.exe" version
+    & "C:\Program Files\CrowdSec\cscli.exe" hub list
+    ```
+  </Step>
+</Steps>
+
+## Manage the Windows Service
+
+CrowdSec registers itself as a Windows Service named `crowdsec` using the Windows Service Control Manager API. You can manage it with PowerShell or `sc.exe`.
+
+### PowerShell
+
+```powershell
+# Start the service
+Start-Service -Name crowdsec
+
+# Stop the service
+Stop-Service -Name crowdsec
+
+# Restart the service
+Restart-Service -Name crowdsec
+
+# Check service status
+Get-Service -Name crowdsec
+
+# Enable automatic start on boot
+Set-Service -Name crowdsec -StartupType Automatic
+
+# View recent service events
+Get-EventLog -LogName Application -Source crowdsec -Newest 20
+```
+
+### sc.exe
+
+```powershell
+# Query service status
+sc.exe query crowdsec
+
+# Start and stop
+sc.exe start crowdsec
+sc.exe stop crowdsec
+
+# Configure automatic start
+sc.exe config crowdsec start= auto
+```
+
+### Manual service registration
+
+If you are installing from a custom build rather than the MSI, register the service manually. The `installService` function in `cmd/crowdsec/win_service_install.go` uses the Windows SCM API to create the service entry:
+
+```powershell
+# Register CrowdSec as a Windows Service (run as Administrator)
+& "C:\Program Files\CrowdSec\crowdsec.exe" -c "C:\ProgramData\CrowdSec\config\config.yaml" -winsvc install
+
+# Start the newly registered service
+& "C:\Program Files\CrowdSec\crowdsec.exe" -c "C:\ProgramData\CrowdSec\config\config.yaml" -winsvc start
+
+# Stop and remove the service
+& "C:\Program Files\CrowdSec\crowdsec.exe" -c "C:\ProgramData\CrowdSec\config\config.yaml" -winsvc stop
+& "C:\Program Files\CrowdSec\crowdsec.exe" -c "C:\ProgramData\CrowdSec\config\config.yaml" -winsvc uninstall
+```
+
+The service manager uses `mgr.CreateService` from `golang.org/x/sys/windows/svc/mgr` to register the binary path with the SCM. The `controlService` function polls the service state for up to 10 seconds when sending stop/pause/continue commands, retrying every 300 ms.
+
+## Windows Event Log acquisition
+
+On Windows, CrowdSec reads the Windows Event Log using the `wineventlog` datasource instead of reading plain log files. Configure acquisition in `C:\ProgramData\CrowdSec\config\acquis.yaml`:
+
+```yaml
+source: wineventlog
+event_channel: Security
+event_ids:
+  - 4625   # Failed logon
+  - 4648   # Logon with explicit credentials
+event_level: ""
+xml_query: ""
+labels:
+  type: windows-security
+```
+
+Additional common channels:
+
+```yaml
+---
+source: wineventlog
+event_channel: System
+labels:
+  type: windows-system
+
+---
+source: wineventlog
+event_channel: Application
+labels:
+  type: windows-application
+
+---
+# IIS access logs (file-based)
+source: file
+filenames:
+  - C:\inetpub\logs\LogFiles\W3SVC1\*.log
+labels:
+  type: iis
+```
+
+Install the `crowdsecurity/windows` collection to get the parsers and scenarios for Windows Event Log:
+
+```powershell
+& "C:\Program Files\CrowdSec\cscli.exe" collections install crowdsecurity/windows
+```
+
+## Path differences from Linux
+
+| Item | Linux | Windows |
+|------|-------|---------|
+| Config directory | `/etc/crowdsec/` | `C:\ProgramData\CrowdSec\config\` |
+| Data directory | `/var/lib/crowdsec/data/` | `C:\ProgramData\CrowdSec\data\` |
+| Log directory | `/var/log/` | `C:\ProgramData\CrowdSec\log\` |
+| Engine binary | `/usr/local/bin/crowdsec` | `C:\Program Files\CrowdSec\crowdsec.exe` |
+| CLI binary | `/usr/local/bin/cscli` | `C:\Program Files\CrowdSec\cscli.exe` |
+| Plugin directory | `/usr/local/lib/crowdsec/plugins/` | `C:\Program Files\CrowdSec\plugins\` |
+| Service management | `systemctl` | `sc.exe` / `Get-Service` |
+| Log acquisition | File, journald, syslog | Windows Event Log, file |
+
+<Warning>
+  The `crowdsec.exe -winsvc install` command will fail if a service named `crowdsec` already exists. Run `crowdsec.exe -winsvc uninstall` first to remove the old registration before re-installing.
+</Warning>
+
+## Verify the installation
+
+```powershell
+# Check the engine and cscli version
+& "C:\Program Files\CrowdSec\cscli.exe" version
+
+# List installed hub items
+& "C:\Program Files\CrowdSec\cscli.exe" hub list
+
+# View recent alerts
+& "C:\Program Files\CrowdSec\cscli.exe" alerts list
+
+# View active block decisions
+& "C:\Program Files\CrowdSec\cscli.exe" decisions list
+```
+
+<Tip>
+  Add `C:\Program Files\CrowdSec\` to your system `PATH` so you can run `cscli` from any terminal without specifying the full path.
+</Tip>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Linux installation" icon="linux" href="/installation/linux">
+    Install CrowdSec on Debian, Ubuntu, RHEL, or from source.
+  </Card>
+  <Card title="Docker installation" icon="docker" href="/installation/docker">
+    Run CrowdSec as a Docker container on Windows with Docker Desktop.
+  </Card>
+  <Card title="Log acquisition" icon="file-lines" href="/configuration/acquisition">
+    Configure the Windows Event Log and file datasources in detail.
+  </Card>
+  <Card title="Bouncers" icon="shield" href="/remediation/bouncers">
+    Install a remediation component to block malicious IPs on Windows Firewall.
+  </Card>
+</CardGroup>

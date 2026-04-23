@@ -1,0 +1,263 @@
+---
+title: "Notifications: Slack, email, and webhook alert plugins"
+description: "Configure CrowdSec notification plugins to send alerts to Slack, email, HTTP webhooks, Splunk, or Microsoft Sentinel when decisions are triggered."
+---
+
+CrowdSec ships a plugin system for sending alert notifications to external services. When a profile creates a decision, it can also trigger one or more notification plugins — Slack, email, HTTP webhook, Splunk, Microsoft Sentinel, or a local file. Each plugin runs as a separate child process and communicates with the main engine over gRPC, so a misbehaving plugin cannot crash CrowdSec itself.
+
+Notifications are **not** the same as bouncer enforcement: a notification tells you that something happened, while a bouncer blocks it. Both can be active at the same time.
+
+## Plugin overview
+
+| Plugin | Type name | Config file |
+|---|---|---|
+| Slack webhook | `slack` | `/etc/crowdsec/notifications/slack.yaml` |
+| Email (SMTP) | `email` | `/etc/crowdsec/notifications/email.yaml` |
+| HTTP webhook | `http` | `/etc/crowdsec/notifications/http.yaml` |
+| Splunk HEC | `splunk` | `/etc/crowdsec/notifications/splunk.yaml` |
+| Microsoft Sentinel | `sentinel` | `/etc/crowdsec/notifications/sentinel.yaml` |
+| File output | `file` | `/etc/crowdsec/notifications/file.yaml` |
+| Dummy (testing) | `dummy` | `/etc/crowdsec/notifications/dummy.yaml` |
+
+## How the plugin system works
+
+The plugin broker reads every `.yaml` file in `/etc/crowdsec/notifications/`. Each file defines one plugin instance with a unique `name` (used to reference it in `profiles.yaml`) and a `type` (the plugin binary to use). When CrowdSec starts, it launches the required plugin binaries from the plugin directory (usually `/usr/lib/crowdsec/plugins/`) and configures them over gRPC.
+
+Alerts flow from the security engine → profile evaluation → plugin broker → plugin process → external service. The broker supports batching via `group_wait` and `group_threshold` so you can coalesce multiple alerts into a single notification rather than sending one message per event.
+
+## Configuring a plugin
+
+All plugin configuration files share the same structure. The `type` and `name` fields are required; everything else is either a shared option or plugin-specific.
+
+### Shared configuration options
+
+```yaml
+type: http           # Plugin type — do not change
+name: http_default   # Unique name; must match the profile reference
+
+log_level: info      # trace | debug | info | warn | error | off
+group_wait: 30s      # Batch alerts for this long before sending
+group_threshold: 10  # Send immediately if this many alerts accumulate
+max_retry: 3         # Retry count on delivery failure
+timeout: 10s         # Timeout per delivery attempt
+```
+
+### Plugin-specific configuration
+
+<Tabs>
+  <Tab title="HTTP webhook">
+    Edit `/etc/crowdsec/notifications/http.yaml`. The `format` field is a Go template that receives a `[]models.Alert` slice — the rendered output becomes the HTTP request body.
+
+    ```yaml
+    type: http
+    name: http_default
+
+    log_level: info
+    # group_wait: 30s
+    # group_threshold: 10
+    # max_retry: 3
+    # timeout: 10s
+
+    # Go template — output becomes the request body
+    format: |
+      {{.|toJson}}
+
+    url: https://hooks.example.com/crowdsec
+    method: POST
+
+    headers:
+      Authorization: "Bearer <token>"
+      Content-Type: "application/json"
+
+    # skip_tls_verification: false
+    ```
+
+    The HTTP plugin also supports Unix sockets (`unix_socket`), mutual TLS (`cert_path`, `key_path`, `ca_cert_path`), and any HTTP verb.
+  </Tab>
+  <Tab title="Slack">
+    Edit `/etc/crowdsec/notifications/slack.yaml`. Set `webhook` to your Slack incoming webhook URL.
+
+    ```yaml
+    type: slack
+    name: slack_default
+
+    log_level: info
+    # group_wait: 30s
+
+    format: |
+      {{range . -}}
+      {{$alert := . -}}
+      {{range .Decisions -}}
+      {{if $alert.Source.Cn -}}
+      :flag-{{$alert.Source.Cn}}: <https://www.whois.com/whois/{{.Value}}|{{.Value}}> will get {{.Type}} for next {{.Duration}} for triggering {{.Scenario}} on machine '{{$alert.MachineID}}'. <https://app.crowdsec.net/cti/{{.Value}}|CrowdSec CTI>{{end}}
+      {{if not $alert.Source.Cn -}}
+      :pirate_flag: <https://www.whois.com/whois/{{.Value}}|{{.Value}}> will get {{.Type}} for next {{.Duration}} for triggering {{.Scenario}} on machine '{{$alert.MachineID}}'. <https://app.crowdsec.net/cti/{{.Value}}|CrowdSec CTI>{{end}}
+      {{end -}}
+      {{end -}}
+
+    webhook: https://hooks.slack.com/services/XXXX/YYYY/ZZZZ
+    # channel: "#security-alerts"
+    # username: "CrowdSec"
+    ```
+  </Tab>
+  <Tab title="Email">
+    Edit `/etc/crowdsec/notifications/email.yaml`. The `format` field produces the HTML email body.
+
+    ```yaml
+    type: email
+    name: email_default
+
+    log_level: info
+    timeout: 20s
+
+    format: |
+      <html><body>
+      {{range . -}}
+        {{$alert := . -}}
+        {{range .Decisions -}}
+          <p><a href="https://www.whois.com/whois/{{.Value}}">{{.Value}}</a>
+          will get <b>{{.Type}}</b> for next <b>{{.Duration}}</b>
+          for triggering <b>{{.Scenario}}</b> on machine <b>{{$alert.MachineID}}</b>.</p>
+        {{end -}}
+      {{end -}}
+      </body></html>
+
+    smtp_host: smtp.example.com
+    smtp_username: alerts@example.com
+    smtp_password: secret
+    smtp_port: 587
+    auth_type: plain          # none | crammd5 | login | plain
+    sender_name: "CrowdSec"
+    sender_email: alerts@example.com
+    email_subject: "CrowdSec Notification"
+    receiver_emails:
+      - security@example.com
+    encryption_type: starttls  # ssltls | starttls | none
+    ```
+  </Tab>
+  <Tab title="Splunk">
+    Edit `/etc/crowdsec/notifications/splunk.yaml`. Set `url` to your Splunk HEC endpoint and `token` to your HEC token.
+
+    ```yaml
+    type: splunk
+    name: splunk_default
+
+    log_level: info
+    # group_wait: 30s
+
+    format: |
+      {{.|toJson}}
+
+    url: https://splunk.example.com:8088/services/collector/event
+    token: <SPLUNK_HEC_TOKEN>
+    ```
+  </Tab>
+  <Tab title="Microsoft Sentinel">
+    Edit `/etc/crowdsec/notifications/sentinel.yaml`. Set `customer_id` (your Log Analytics workspace ID) and `shared_key`.
+
+    ```yaml
+    type: sentinel
+    name: sentinel_default
+
+    log_level: info
+    # group_wait: 30s
+
+    format: |
+      {{.|toJson}}
+
+    customer_id: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    shared_key: base64encodedKey==
+    log_type: crowdsec
+    ```
+  </Tab>
+  <Tab title="File">
+    Edit `/etc/crowdsec/notifications/file.yaml`. Alerts are written as newline-delimited JSON by default, with built-in log rotation.
+
+    ```yaml
+    type: file
+    name: file_default
+
+    log_level: info
+    # group_wait: 30s
+
+    format: |
+      {{range . -}}
+       { "time": "{{.StopAt}}", "program": "crowdsec", "alert": {{. | toJson }} }
+      {{ end -}}
+
+    log_path: /var/log/crowdsec_alerts.json
+    rotate:
+      enabled: true
+      max_size: 500    # MB before rotation
+      max_files: 5     # number of rotated files to keep
+      max_age: 5       # days before deletion
+      compress: true
+    ```
+  </Tab>
+</Tabs>
+
+## Wiring a plugin to a profile
+
+After configuring a plugin, reference its `name` in the `notifications` list of one or more profiles in `/etc/crowdsec/profiles.yaml`. A plugin is only loaded if it appears in at least one active profile.
+
+```yaml
+name: default_ip_remediation
+filters:
+  - Alert.Remediation == true && Alert.GetScope() == "Ip"
+decisions:
+  - type: ban
+    duration: 4h
+notifications:
+  - http_default     # references the 'name' field in http.yaml
+  - slack_default    # references the 'name' field in slack.yaml
+on_success: break
+```
+
+After editing `profiles.yaml`, restart CrowdSec to apply the change:
+
+```bash
+sudo systemctl restart crowdsec
+```
+
+<Warning>
+  The `name` value in the notification config file must exactly match the string listed under `notifications` in `profiles.yaml`. A mismatch causes CrowdSec to fail at startup with an error like `config file for plugin <name> not found`.
+</Warning>
+
+## Testing notifications
+
+Use `cscli notifications` to inspect and test configured plugins without waiting for a real alert.
+
+```bash
+# List all configured notification plugins
+sudo cscli notifications list
+
+# Send a test alert to a specific plugin
+sudo cscli notifications test http_default
+```
+
+The `test` subcommand sends a synthetic alert to the named plugin and reports whether the delivery succeeded. This is the fastest way to verify credentials, URLs, and templates before putting the plugin into production.
+
+<Tip>
+  Use `group_wait: 30s` combined with `group_threshold: 10` to avoid notification floods during active attacks. CrowdSec will batch alerts for 30 seconds (or until 10 accumulate) and send them in a single message.
+</Tip>
+
+## Alert format templates
+
+The `format` field in every notification config is a Go template that receives `[]models.Alert`. The `toJson` function (from the Sprig library) serializes values to JSON, making it easy to forward structured data to any webhook consumer.
+
+Common template variables available on each alert:
+
+| Template expression | Description |
+|---|---|
+| `{{.MachineID}}` | The CrowdSec agent that raised the alert |
+| `{{.Source.IP}}` | Source IP address |
+| `{{.Source.Cn}}` | Country code of the source IP |
+| `{{range .Decisions}}` | Iterate over decisions in the alert |
+| `{{.Value}}` | Decision target (IP, range, username…) |
+| `{{.Type}}` | Decision type (`ban`, `captcha`…) |
+| `{{.Duration}}` | Remaining duration of the decision |
+| `{{.Scenario}}` | Scenario that triggered the alert |
+
+<Note>
+  Sprig template functions are available in all notification format templates. You can use `toJson`, `upper`, `lower`, `trimAll`, `dateInZone`, and many others to transform the output to match your destination service's expected format.
+</Note>

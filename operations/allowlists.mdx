@@ -1,0 +1,229 @@
+---
+title: "Allowlists: prevent trusted IPs from being blocked"
+description: "Keep trusted IPs and ranges out of CrowdSec decisions using centralized cscli allowlists or parser-level YAML whitelists for fine-grained exclusions."
+---
+
+Allowlists tell CrowdSec to ignore specific IP addresses or ranges so they are never blocked, regardless of what scenarios detect. This is essential for infrastructure components like monitoring systems, uptime checkers, CDN egress nodes, and office networks that may trigger detection rules during normal operation. CrowdSec supports two complementary mechanisms: centralized allowlists managed through `cscli` and the Local API, and parser-level whitelists defined in YAML configuration files.
+
+## Centralized allowlists (cscli)
+
+Centralized allowlists are stored in the LAPI database and enforced at the decision layer. When a new decision targets an IP or range that appears in an allowlist, the decision is silently dropped. Any existing decisions for allowlisted values are also removed when the allowlist is updated.
+
+Allowlists can also be managed from the [CrowdSec Console](https://app.crowdsec.net/allowlists). Allowlists created via the Console are marked as `console_managed` and cannot be edited locally with `cscli`.
+
+### Creating and populating an allowlist
+
+<Steps>
+  <Step title="Create the allowlist">
+    ```bash
+    cscli allowlists create my_allowlist -d "Internal monitoring and office IPs"
+    ```
+    The `-d` (description) flag is required.
+  </Step>
+
+  <Step title="Add entries">
+    ```bash
+    # Add one or more IPs
+    cscli allowlists add my_allowlist 10.0.0.1 10.0.0.2
+
+    # Add a CIDR range
+    cscli allowlists add my_allowlist 192.168.0.0/16
+
+    # Add with an expiration (useful for temporary exceptions)
+    cscli allowlists add my_allowlist 203.0.113.50 --expiration 24h
+
+    # Add with a comment for tracking
+    cscli allowlists add my_allowlist 198.51.100.0/24 -d "CDN egress range - Acme CDN"
+    ```
+  </Step>
+
+  <Step title="Verify the entry">
+    ```bash
+    cscli allowlists check 10.0.0.1
+    ```
+    Output: `10.0.0.1 is allowlisted by item my_allowlist`
+  </Step>
+</Steps>
+
+### Managing allowlists
+
+```bash
+# List all allowlists with entry counts
+cscli allowlists list
+
+# Inspect a specific allowlist and its entries
+cscli allowlists inspect my_allowlist
+
+# Remove specific entries from an allowlist
+cscli allowlists remove my_allowlist 10.0.0.2
+
+# Delete an entire allowlist
+cscli allowlists delete my_allowlist
+```
+
+### Importing entries in bulk
+
+Use `cscli allowlists import` to load entries from a file:
+
+```bash
+# Import from a plain-text file (one IP/CIDR per line)
+cscli allowlists import my_allowlist --file /etc/crowdsec/trusted-ranges.txt
+```
+
+### Checking allowlist status
+
+```bash
+# Check whether a single IP is allowlisted across any allowlist
+cscli allowlists check 1.2.3.4
+
+# Output as JSON for scripting
+cscli -o json allowlists list
+```
+
+### Command reference summary
+
+| Command | Description |
+|---|---|
+| `cscli allowlists create <name> -d <desc>` | Create a new allowlist |
+| `cscli allowlists list` | List all allowlists |
+| `cscli allowlists inspect <name>` | Show contents of an allowlist |
+| `cscli allowlists add <name> <value...>` | Add IPs or CIDRs to an allowlist |
+| `cscli allowlists remove <name> <value...>` | Remove entries from an allowlist |
+| `cscli allowlists delete <name>` | Delete an allowlist entirely |
+| `cscli allowlists check <ip>` | Check if an IP is allowlisted |
+| `cscli allowlists import <name> --file <path>` | Bulk-import entries from a file |
+
+## Parser-level whitelists
+
+Parser whitelists operate earlier in the pipeline, before events reach scenarios or generate decisions. They are defined in YAML files in `/etc/crowdsec/parsers/s02-enrich/` and use the standard CrowdSec parser format with a `whitelist` section. Use this approach when you want to suppress specific log lines entirely — not just prevent blocking — for example, to avoid noise in your alert history.
+
+### Whitelist by IP or CIDR
+
+```yaml
+name: crowdsecurity/whitelists
+description: "Whitelist trusted internal sources"
+whitelist:
+  reason: "Internal network"
+  ip:
+    - "10.0.0.0/8"
+    - "172.16.0.0/12"
+    - "192.168.0.0/16"
+```
+
+### Whitelist by expression
+
+Expressions use the [CrowdSec expression language](https://doc.crowdsec.net/docs/expr/intro) and give you precise control based on any parsed field:
+
+```yaml
+name: crowdsecurity/whitelists
+description: "Whitelist known-good user agents and internal sources"
+whitelist:
+  reason: "Known safe traffic"
+  expression:
+    - "evt.Parsed.http_user_agent contains 'GoogleBot'"
+    - "evt.Meta.source_ip startsWith '10.'"
+```
+
+### Whitelist by CIDR expression
+
+For dynamic CIDR matching in expressions:
+
+```yaml
+name: crowdsecurity/whitelists
+description: "Whitelist CDN ranges"
+whitelist:
+  reason: "Cloudflare CDN"
+  expression:
+    - "IpInRange(evt.Parsed.source_ip, '103.21.244.0/22')"
+    - "IpInRange(evt.Parsed.source_ip, '103.22.200.0/22')"
+```
+
+<Warning>
+Parser whitelists suppress events before they reach scenarios. This means whitelisted events will not appear in your alert history at all. Use centralized allowlists if you want events to be visible but decisions to be suppressed.
+</Warning>
+
+### Applying the whitelist
+
+After creating or modifying a whitelist parser, restart CrowdSec to load it:
+
+```bash
+sudo systemctl restart crowdsec
+```
+
+Confirm it is loaded:
+
+```bash
+cscli parsers list | grep whitelist
+```
+
+## Common allowlisting scenarios
+
+<CardGroup cols={2}>
+
+<Card title="Office or VPN IP range" icon="building">
+```bash
+cscli allowlists create office_network \
+  -d "Company office and VPN egress"
+cscli allowlists add office_network \
+  203.0.113.0/24 \
+  198.51.100.10
+```
+</Card>
+
+<Card title="Monitoring and uptime checks" icon="chart-line">
+```bash
+cscli allowlists create monitoring \
+  -d "Nagios, Datadog, and uptime checkers"
+cscli allowlists add monitoring \
+  10.10.1.5 \
+  --expiration 0 \
+  -d "Nagios host"
+```
+</Card>
+
+<Card title="CDN egress range" icon="globe">
+```bash
+# For parser-level suppression of CDN ranges
+# add a whitelist parser with IpInRange expressions
+# for all CDN CIDR blocks
+cscli allowlists create cdn_egress \
+  -d "CDN provider egress IPs"
+cscli allowlists add cdn_egress \
+  104.16.0.0/13 \
+  -d "Cloudflare"
+```
+</Card>
+
+<Card title="Temporary exception" icon="clock">
+```bash
+# Allow a specific IP for 4 hours (e.g. during a pentest)
+cscli allowlists add pentest_window \
+  198.51.100.99 \
+  --expiration 4h \
+  -d "Authorized pentest - ticket #1234"
+```
+</Card>
+
+</CardGroup>
+
+## How decisions interact with allowlists
+
+When you call `cscli decisions add` for a value that is in an allowlist, the command will refuse to add the decision:
+
+```bash
+$ cscli decisions add --ip 10.0.0.5
+Error: 10.0.0.5 is allowlisted by item my_allowlist, use --bypass-allowlist to add the decision anyway
+```
+
+To override this check explicitly:
+
+```bash
+cscli decisions add --ip 10.0.0.5 --bypass-allowlist
+```
+
+Similarly, when you add an IP to an allowlist that already has an active decision, CrowdSec automatically removes the existing decision:
+
+```
+added 1 values to allowlist my_allowlist
+1 decisions deleted by allowlists
+```

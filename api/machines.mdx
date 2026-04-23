@@ -1,0 +1,214 @@
+---
+title: "Machines API: register and manage detection agents"
+description: "Register CrowdSec detection agents with LAPI, authenticate to receive short-lived JWT tokens, and send periodic heartbeats to stay active."
+---
+
+Before a CrowdSec agent can push alerts or query LAPI, it must register itself as a machine and then log in to receive a JWT token. Registration is a one-time step performed automatically during installation. The login step happens each time the agent starts. A periodic heartbeat keeps the registration record active in the LAPI database. Together these three endpoints form the complete agent lifecycle against LAPI.
+
+---
+
+## Machine registration flow
+
+<Steps>
+  <Step title="Register the machine">
+    Call `POST /v1/watchers` with a chosen `machine_id` and `password`. This creates the machine record in the LAPI database. On a standard local installation, the machine is auto-validated. On a multi-node setup you may need an operator to run `cscli machines validate <machine_id>`.
+  </Step>
+
+  <Step title="Log in">
+    Call `POST /v1/watchers/login` with the same credentials. LAPI returns a JWT token and its expiry time. The agent stores and reuses this token until it expires, then re-authenticates automatically.
+  </Step>
+
+  <Step title="Send a heartbeat">
+    At regular intervals, call `GET /v1/heartbeat` with the JWT token. LAPI records the timestamp so operators can see which agents are active in `cscli machines list`.
+  </Step>
+</Steps>
+
+---
+
+## POST /v1/watchers
+
+Register a new machine with LAPI. This endpoint does not require authentication — it is called before the machine has credentials.
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/watchers \
+  -H "Content-Type: application/json" \
+  -d '{
+    "machine_id": "my-crowdsec-agent",
+    "password": "a-strong-password"
+  }'
+```
+
+### Request body
+
+<ResponseField name="machine_id" type="string" required>
+  A unique identifier for this agent. By convention, CrowdSec uses the hostname with a random suffix, e.g. `myhost1234567890ab`.
+</ResponseField>
+
+<ResponseField name="password" type="string" required>
+  Password for this machine. Must meet the minimum length requirement configured in LAPI.
+</ResponseField>
+
+<ResponseField name="registration_token" type="string">
+  Optional. Required only when LAPI has `auto_registration` enabled. The token must match `api.server.auto_registration.token` in the LAPI config.
+</ResponseField>
+
+### Responses
+
+| Status | Meaning |
+|---|---|
+| `201 Created` | Machine registered and awaiting operator validation. |
+| `202 Accepted` | Machine registered and auto-validated (auto-registration matched). |
+| `400 Bad Request` | Missing or invalid fields. |
+| `401 Unauthorized` | Invalid auto-registration token or IP not in `allowed_ranges`. |
+
+<Note>
+  If the machine ID already exists, the request is rejected. Delete the existing machine with `cscli machines delete <machine_id>` before re-registering.
+</Note>
+
+### Auto-registration
+
+When LAPI is configured with `api.server.auto_registration`, agents from allowed IP ranges can register and be validated automatically in a single step:
+
+```yaml
+# config.yaml (server side)
+api:
+  server:
+    auto_registration:
+      enabled: true
+      token: "a-secret-token-at-least-32-chars-long"
+      allowed_ranges:
+        - "10.0.0.0/8"
+        - "192.168.1.0/24"
+```
+
+The agent then includes the token in its registration request:
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/watchers \
+  -H "Content-Type: application/json" \
+  -d '{
+    "machine_id": "agent-from-k8s-pod",
+    "password": "strong-password",
+    "registration_token": "a-secret-token-at-least-32-chars-long"
+  }'
+```
+
+---
+
+## POST /v1/watchers/login
+
+Authenticate an existing machine and receive a JWT token. Call this on every agent startup and whenever the token expires.
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/watchers/login \
+  -H "Content-Type: application/json" \
+  -d '{
+    "machine_id": "my-crowdsec-agent",
+    "password": "a-strong-password",
+    "scenarios": [
+      "crowdsecurity/ssh-bf",
+      "crowdsecurity/http-bf",
+      "crowdsecurity/http-crawl-non_statics"
+    ]
+  }'
+```
+
+### Request body
+
+<ResponseField name="machine_id" type="string" required>
+  The machine ID used during registration.
+</ResponseField>
+
+<ResponseField name="password" type="string" required>
+  The password used during registration.
+</ResponseField>
+
+<ResponseField name="scenarios" type="array">
+  List of scenario names currently loaded on this agent. LAPI forwards this list to CAPI to track which scenarios are in use across the network. Optional but recommended.
+</ResponseField>
+
+### Response `200 OK`
+
+```json
+{
+  "code": 200,
+  "expire": "2026-04-24T10:00:00Z",
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6Im15LWNyb3dkc2VjLWFnZW50IiwiZXhwIjoxNzQ1NDkxMjAwfQ.SIGNATURE"
+}
+```
+
+<ResponseField name="token" type="string">
+  The JWT to include as `Authorization: Bearer <token>` in subsequent requests.
+</ResponseField>
+
+<ResponseField name="expire" type="string">
+  RFC 3339 expiry time. Re-authenticate before this time.
+</ResponseField>
+
+<ResponseField name="code" type="integer">
+  HTTP status code mirrored in the response body (`200`).
+</ResponseField>
+
+### Response `403 Forbidden`
+
+Returned when the machine is not yet validated by an operator:
+
+```json
+{ "message": "machine my-crowdsec-agent not validated" }
+```
+
+Validate the machine with:
+
+```bash
+cscli machines validate my-crowdsec-agent
+```
+
+---
+
+## GET /v1/heartbeat
+
+Send a heartbeat to LAPI. LAPI records the current timestamp as the machine's last heartbeat. This endpoint requires a valid JWT token.
+
+```bash
+curl http://127.0.0.1:8080/v1/heartbeat \
+  -H "Authorization: Bearer <jwt>"
+```
+
+**Response `200 OK`** — no body.
+
+The CrowdSec agent sends a heartbeat every 30 seconds by default. You can view heartbeat timestamps with:
+
+```bash
+cscli machines list
+```
+
+---
+
+## DELETE /v1/watchers/self
+
+Unregister the calling machine. The machine must be authenticated with a valid JWT. This is called automatically when a CrowdSec agent is uninstalled with the `unregister_on_exit` option enabled in `local_api_credentials.yaml`.
+
+```bash
+curl -X DELETE http://127.0.0.1:8080/v1/watchers/self \
+  -H "Authorization: Bearer <jwt>"
+```
+
+**Response `204 No Content`** — machine deleted.
+
+---
+
+## Managing machines with cscli
+
+```bash
+# List all registered machines and their last heartbeat
+cscli machines list
+
+# Validate a pending machine
+cscli machines validate my-crowdsec-agent
+
+# Remove a machine
+cscli machines delete my-crowdsec-agent
+
+# Add a machine manually (generates credentials)
+cscli machines add my-crowdsec-agent --auto
+```

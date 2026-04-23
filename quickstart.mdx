@@ -1,80 +1,141 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: "CrowdSec quickstart: install, configure, and block"
+description: "Install CrowdSec on Linux, verify the service, add a bouncer to enforce decisions, and view your first alert — all in under ten minutes."
 ---
 
-## Get started in three steps
+CrowdSec is installed as a system service that reads your log sources, detects attacks using community-maintained scenarios, and shares signals with the global network. This guide walks you through installing the security engine, confirming it is running, adding a bouncer to enforce bans, and inspecting your first alert.
 
-Get your documentation site running locally and make your first customization.
+<Steps>
 
-### Step 1: Set up your local environment
+<Step title="Add the CrowdSec repository and install">
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+CrowdSec publishes packages for both Debian/Ubuntu-based and RHEL/CentOS-based distributions through an official repository.
 
-### Step 2: Deploy your changes
+<CodeGroup>
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+```bash apt (Debian / Ubuntu)
+curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | sudo bash
+sudo apt-get install crowdsec
+```
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+```bash yum / dnf (RHEL / CentOS / Fedora)
+curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.rpm.sh | sudo bash
+sudo yum install crowdsec
+```
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+</CodeGroup>
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+The install script configures the packagecloud repository and installs the `crowdsec` package along with `cscli`, the command-line management tool. No separate install step is needed for `cscli`.
 </Note>
+
+After installation, the service starts automatically and begins reading the log sources detected on your system (for example, `/var/log/auth.log` on Debian-based systems).
+
+</Step>
+
+<Step title="Verify the service is running">
+
+Check that the CrowdSec service is active and that the Local API is listening on `127.0.0.1:8080`:
+
+```bash
+sudo systemctl status crowdsec
+```
+
+You should see `active (running)` in the output. You can also use `cscli` to confirm the engine has registered itself:
+
+```bash
+sudo cscli machines list
+```
+
+A healthy installation shows one machine with a recent heartbeat timestamp. To view what log sources are being read and which parsers and scenarios are loaded:
+
+```bash
+sudo cscli metrics
+```
+
+<Tip>
+If the service fails to start, check `/var/log/crowdsec.log` for details. The most common cause is a conflict with an existing process on port 8080.
+</Tip>
+
+</Step>
+
+<Step title="Install a bouncer">
+
+CrowdSec detects threats and records decisions, but enforcement is done by **bouncers** (also called Remediation Components). A bouncer reads decisions from the Local API and applies them — for example, by dropping packets at the firewall level.
+
+Install the firewall bouncer, which integrates with `iptables` or `nftables`:
+
+<CodeGroup>
+
+```bash apt (Debian / Ubuntu)
+sudo apt-get install crowdsec-firewall-bouncer-iptables
+```
+
+```bash yum / dnf (RHEL / CentOS / Fedora)
+sudo yum install crowdsec-firewall-bouncer-iptables
+```
+
+</CodeGroup>
+
+The bouncer registers itself with the Local API automatically. Verify it appears in the bouncer list:
+
+```bash
+sudo cscli bouncers list
+```
+
+You should see `crowdsec-firewall-bouncer` listed with a recent last pull time. From this point, any IP that triggers a ban decision is automatically blocked at the firewall level.
+
+<Note>
+Other bouncers are available for Nginx, Traefik, Caddy, AWS WAF, and more. Browse the full list at [hub.crowdsec.net](https://hub.crowdsec.net).
+</Note>
+
+</Step>
+
+<Step title="View your first alert">
+
+As CrowdSec processes your logs, it raises alerts when a scenario threshold is exceeded — for example, multiple failed SSH authentication attempts from the same IP.
+
+List recent alerts:
+
+```bash
+sudo cscli alerts list
+```
+
+Each alert shows the scenario that fired, the offending IP, the scope, and the timestamp. To see the full detail for a specific alert, use its ID:
+
+```bash
+sudo cscli alerts inspect <alert-id>
+```
+
+To see the active ban decisions currently enforced by your bouncers:
+
+```bash
+sudo cscli decisions list
+```
+
+<Tip>
+You can also view alerts and decisions with a filter. For example, to show only SSH brute-force alerts: `sudo cscli alerts list --scenario crowdsecurity/ssh-bf`
+</Tip>
+
+</Step>
+
+</Steps>
+
+## What happens next
+
+With CrowdSec running, your server is already benefiting from the community blocklist — a curated list of known-malicious IPs that is pushed to your instance from the Central API. Every alert your instance generates is also (anonymously) shared back, protecting other users in the network.
+
+<CardGroup cols={2}>
+  <Card title="Installation options" icon="download" href="/installation/linux">
+    Deploy on Docker, Kubernetes, or Windows — or customize the Linux install with advanced options.
+  </Card>
+  <Card title="Detection scenarios" icon="shield-halved" href="/detection/scenarios">
+    Browse and install community scenarios for SSH, HTTP, WordPress, and hundreds of other attack patterns.
+  </Card>
+  <Card title="Configure log sources" icon="file-lines" href="/configuration/acquisition">
+    Add or adjust log file paths and data sources in `acquis.yaml`.
+  </Card>
+  <Card title="Core concepts" icon="lightbulb" href="/concepts">
+    Understand how parsers, leaky buckets, decisions, and the LAPI/CAPI work together.
+  </Card>
+</CardGroup>

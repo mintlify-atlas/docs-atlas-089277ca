@@ -1,0 +1,169 @@
+---
+title: "CrowdSec Hub: browse and install security content packs"
+description: "The CrowdSec Hub hosts community-maintained parsers, scenarios, collections, and AppSec rules installable with a single cscli command."
+---
+
+The CrowdSec Hub is the distribution point for all community-maintained security content. Instead of writing parsers and scenarios from scratch, you pull battle-tested configurations from the Hub and keep them up to date as the community discovers new attack patterns. Every item is versioned, hash-verified, and available under the MIT license. The Hub website at [hub.crowdsec.net](https://hub.crowdsec.net) lets you browse, search, and inspect content before installing it.
+
+## Content types
+
+<CardGroup cols={2}>
+  <Card title="Collections" icon="layer-group">
+    Bundles that group related parsers, scenarios, and other collections for a specific service or use case. Installing a collection automatically installs all its dependencies. Example: `crowdsecurity/sshd` installs the SSH log parser and brute-force scenario in one step.
+  </Card>
+  <Card title="Parsers" icon="filter">
+    YAML files that transform raw log lines into structured events. Parsers use grok patterns, static field assignments, and enrichment plugins. Stages (`s00-raw`, `s01-parse`, `s02-enrich`) control processing order.
+  </Card>
+  <Card title="Scenarios" icon="triangle-exclamation">
+    Leaky bucket definitions that detect attack patterns across parsed events. Scenarios fire alerts when thresholds are exceeded — for example, more than 5 SSH failures from the same IP within 50 seconds.
+  </Card>
+  <Card title="AppSec configs" icon="shield-halved">
+    Configuration files for the AppSec WAF component. They declare which appsec-rules to load and define in-band/out-of-band phases, hooks, and remediation actions.
+  </Card>
+  <Card title="AppSec rules" icon="code">
+    Coraza/ModSecurity rule sets that the AppSec engine evaluates against HTTP requests. These cover OWASP CRS, virtual patching, and CVE-specific exploit signatures.
+  </Card>
+  <Card title="Post-overflows" icon="arrow-right-arrow-left">
+    Parsers that run against alert events (overflows) rather than raw log lines. Used for enriching or filtering alerts before they are forwarded to the API.
+  </Card>
+</CardGroup>
+
+## Hub index commands
+
+The `cscli hub` commands manage the local index — the catalog file that lists all available items and their versions.
+
+```bash
+# Download the latest hub index (run this before installing or upgrading)
+cscli hub update
+
+# Download the index with embedded item content (pre-caches downloads)
+cscli hub update --with-content
+
+# List all installed items across all types
+cscli hub list
+
+# List all installed items, including local and tainted
+cscli hub list -a
+
+# Upgrade all installed items to the latest indexed version
+cscli hub upgrade
+
+# Preview what upgrade would do without making changes
+cscli hub upgrade --dry-run
+
+# Force upgrade, overwriting tainted items and refreshing data files
+cscli hub upgrade --force
+
+# List the supported item types
+cscli hub types
+```
+
+<Note>
+Run `cscli hub update` before `cscli hub upgrade` to ensure the local index reflects the latest available versions. `upgrade` only works from the locally cached index.
+</Note>
+
+## Working with collections
+
+Collections are the recommended way to install content. A single collection install pulls in all the parsers, scenarios, and sub-collections it depends on.
+
+```bash
+# Install a collection and all its dependencies
+cscli collections install crowdsecurity/sshd
+
+# Install multiple collections
+cscli collections install crowdsecurity/sshd crowdsecurity/nginx
+
+# List installed collections
+cscli collections list
+
+# List all available collections
+cscli collections list -a
+
+# Inspect a collection (metadata, state, dependencies)
+cscli collections inspect crowdsecurity/sshd
+
+# Show difference between a locally modified (tainted) collection and the hub version
+cscli collections inspect crowdsecurity/sshd --diff
+
+# Remove a collection
+cscli collections remove crowdsecurity/sshd
+
+# Remove a collection and delete its downloaded files
+cscli collections remove crowdsecurity/sshd --purge
+```
+
+## Working with individual item types
+
+Each content type has its own `cscli` subcommand with the same verbs (`list`, `install`, `remove`, `upgrade`, `inspect`):
+
+```bash
+# Parsers
+cscli parsers install crowdsecurity/sshd-logs
+cscli parsers list -a
+cscli parsers remove crowdsecurity/sshd-logs
+
+# Scenarios
+cscli scenarios install crowdsecurity/ssh-bf
+cscli scenarios list
+cscli scenarios upgrade crowdsecurity/ssh-bf
+
+# AppSec configs
+cscli appsec-configs install crowdsecurity/virtual-patching
+cscli appsec-configs list
+
+# AppSec rules
+cscli appsec-rules install crowdsecurity/crs
+cscli appsec-rules list -a
+
+# Post-overflow parsers
+cscli postoverflows install crowdsecurity/rdns
+cscli postoverflows list
+```
+
+## Searching Hub content
+
+Browse and search the full catalog at [hub.crowdsec.net](https://hub.crowdsec.net). On the command line, use `list -a` with `grep` to filter by name, or use `inspect` to read the full metadata of a specific item:
+
+```bash
+# Find all nginx-related collections
+cscli collections list -a | grep nginx
+
+# Find all scenarios related to HTTP
+cscli scenarios list -a | grep http
+
+# Read full metadata for an item
+cscli scenarios inspect crowdsecurity/http-probing
+```
+
+## Item states
+
+Hub items can be in one of several states:
+
+| State | Meaning |
+|---|---|
+| **installed** | Downloaded and enabled; CrowdSec loads it on startup |
+| **downloaded** | Downloaded but not enabled (`--download-only` flag) |
+| **tainted** | Locally modified after installation; upgrade will warn before overwriting |
+| **local** | Not from the hub; created directly in the config directory |
+| **outdated** | A newer version exists in the hub index |
+
+<Tip>
+Locally modifying a hub item taints it. If you need to customize a parser or scenario, copy it to a new name and edit the copy. This keeps the original item clean and upgradeable.
+</Tip>
+
+## Keeping content up to date
+
+```bash
+# Full update cycle: refresh index, then upgrade all installed items
+cscli hub update && cscli hub upgrade
+```
+
+Set up a scheduled task (cron, systemd timer) to run this regularly — new parsers and scenarios are published as new services and attack patterns emerge.
+
+<Warning>
+After upgrading items, reload CrowdSec so the new configurations take effect:
+
+```bash
+sudo systemctl reload crowdsec
+```
+</Warning>

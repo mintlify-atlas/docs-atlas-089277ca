@@ -1,0 +1,157 @@
+---
+title: "Authenticating with the CrowdSec Local API clients"
+description: "CrowdSec LAPI uses short-lived JWT tokens for agents and static API keys for bouncers — learn how to obtain and use each credential type."
+---
+
+The CrowdSec Local API uses two separate authentication schemes depending on the type of client. Agents (the CrowdSec detection engine and `cscli`) authenticate with short-lived JWT tokens obtained by posting credentials to `/v1/watchers/login`. Bouncers (remediation components) authenticate with a static API key sent in the `X-Api-Key` request header. The two schemes are intentionally separate: agents have write access to push alerts, while bouncers have read access to query decisions.
+
+## Authentication schemes
+
+<Tabs>
+  <Tab title="Agents (JWT)">
+    ### How JWT authentication works
+
+    Agents must first be **registered** with LAPI (once), then **log in** to receive a JWT token on each startup.
+
+    <Steps>
+      <Step title="Register the machine">
+        Call `POST /v1/watchers` with a machine ID and password. This step is performed automatically when you install CrowdSec.
+
+        ```bash
+        curl -X POST http://127.0.0.1:8080/v1/watchers \
+          -H "Content-Type: application/json" \
+          -d '{
+            "machine_id": "my-crowdsec-agent",
+            "password": "a-strong-password"
+          }'
+        ```
+
+        A `201 Created` response means the machine is registered and awaiting validation. On a local install, machines are validated automatically.
+      </Step>
+
+      <Step title="Log in to get a JWT">
+        Call `POST /v1/watchers/login` with the same credentials. The response contains the JWT token and its expiry time.
+
+        ```bash
+        curl -X POST http://127.0.0.1:8080/v1/watchers/login \
+          -H "Content-Type: application/json" \
+          -d '{
+            "machine_id": "my-crowdsec-agent",
+            "password": "a-strong-password",
+            "scenarios": ["crowdsecurity/http-bf", "crowdsecurity/ssh-bf"]
+          }'
+        ```
+
+        **Response:**
+
+        ```json
+        {
+          "code": 200,
+          "expire": "2026-04-24T10:00:00Z",
+          "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+        }
+        ```
+      </Step>
+
+      <Step title="Use the token in requests">
+        Pass the JWT in the `Authorization` header for all subsequent watcher requests.
+
+        ```bash
+        curl http://127.0.0.1:8080/v1/alerts \
+          -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+        ```
+      </Step>
+    </Steps>
+
+    ### Token expiry and refresh
+
+    The `expire` field in the login response is an RFC 3339 timestamp. When the token expires, the CrowdSec agent automatically re-authenticates by calling `POST /v1/watchers/login` again with the stored credentials. LAPI also caches the last valid token in the database to avoid unnecessary round-trips.
+
+    <Note>
+      The `scenarios` array in the login request tells LAPI which detection scenarios the agent has loaded. This information is forwarded to CAPI for network-wide scenario statistics.
+    </Note>
+  </Tab>
+
+  <Tab title="Bouncers (API key)">
+    ### How API key authentication works
+
+    Bouncer API keys are static strings that you generate with `cscli`. They do not expire unless you revoke them explicitly.
+
+    <Steps>
+      <Step title="Generate a bouncer API key">
+        Run the following command on the host where LAPI is installed:
+
+        ```bash
+        cscli bouncers add my-bouncer
+        ```
+
+        The command outputs a key similar to:
+
+        ```
+        API key for 'my-bouncer':
+
+          a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4
+
+        Please save this key as it will not be shown again.
+        ```
+
+        <Warning>
+          The key is shown only once. Copy it immediately and store it securely. If you lose it, delete the bouncer with `cscli bouncers delete my-bouncer` and create a new one.
+        </Warning>
+      </Step>
+
+      <Step title="Send the key in the X-Api-Key header">
+        Include the key in every request as the `X-Api-Key` header.
+
+        ```bash
+        curl http://127.0.0.1:8080/v1/decisions/stream?startup=true \
+          -H "X-Api-Key: a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
+        ```
+      </Step>
+    </Steps>
+
+    ### List and revoke bouncers
+
+    ```bash
+    # List all registered bouncers
+    cscli bouncers list
+
+    # Remove a bouncer (immediately invalidates its key)
+    cscli bouncers delete my-bouncer
+    ```
+
+    <Tip>
+      Use a descriptive name when adding a bouncer so you can identify it later. For example, `cscli bouncers add nginx-bouncer-prod`.
+    </Tip>
+  </Tab>
+</Tabs>
+
+## Credential files
+
+### Agent credentials
+
+The agent stores its `machine_id` and `password` in the file referenced by `api.client.credentials_path` in `config.yaml`. The default path is `/etc/crowdsec/local_api_credentials.yaml`.
+
+```yaml
+url: http://127.0.0.1:8080
+login: my-crowdsec-agent
+password: a-strong-password
+```
+
+### CAPI credentials
+
+When your LAPI is registered with the CrowdSec Central API, its credentials are stored in the file referenced by `api.server.online_client.credentials_path`. See [Central API overview](/api/capi-overview) for details.
+
+## Security considerations
+
+<AccordionGroup>
+  <Accordion title="TLS encryption">
+    LAPI supports TLS. Configure `api.server.tls` in `config.yaml` with `cert_file` and `key_file` paths. Bouncers and agents can also authenticate via TLS client certificates as an alternative to JWT or API key auth.
+  </Accordion>
+  <Accordion title="Trusted IPs for delete operations">
+    The `DELETE /v1/alerts` and `DELETE /v1/alerts/{id}` endpoints are restricted to requests from trusted IP addresses (loopback and any IPs listed in `api.server.trusted_ips`). This prevents remote clients from bulk-deleting alerts even if they hold a valid JWT.
+  </Accordion>
+  <Accordion title="Auto-registration">
+    LAPI can be configured to automatically validate newly registered machines from specific IP ranges. Set `api.server.auto_registration.enabled: true` together with a `token` and `allowed_ranges` list. The agent must include the `registration_token` field in its `POST /v1/watchers` request.
+  </Accordion>
+</AccordionGroup>

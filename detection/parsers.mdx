@@ -1,0 +1,218 @@
+---
+title: "Parsers: extract structured fields from log events"
+description: "CrowdSec parsers transform raw log lines into structured events using grok patterns, static assignments, and enrichment plugins across ordered stages."
+---
+
+Parsers are the first stage of the CrowdSec detection pipeline. They read raw log lines and transform them into structured `Event` objects that scenarios can reason about. Each parser is a YAML file containing grok patterns, field assignments, and optional enrichment directives. Parsers are organized into numbered stages — `s00-raw`, `s01-parse`, `s02-enrich` — and are processed in alphabetical stage order, so you control exactly when each transformation runs.
+
+## How parsers work
+
+A raw log line enters the parser pipeline as an `Event`. The `Event` carries four mutable dictionaries:
+
+- `Line` — the original raw line and its metadata
+- `Parsed` — string fields extracted by grok patterns
+- `Meta` — metadata added by statics or enrichment (e.g., `source_ip`, `service`)
+- `Enriched` — output from enrichment plugins (e.g., GeoIP data)
+
+Each parser node evaluates a `filter` expression. If the filter matches, the node applies its grok pattern and statics, then either advances the event to the next stage (`onsuccess: next_stage`) or continues in the current stage (`onsuccess: continue`).
+
+## Parser YAML structure
+
+```yaml
+# Stage tells CrowdSec which processing stage this parser belongs to.
+# Stages are processed alphabetically: s00-raw → s01-parse → s02-enrich
+stage: s01-parse
+
+# filter controls which events this parser acts on.
+# Uses the expr expression language evaluated against the Event object.
+filter: "evt.Parsed.program == 'sshd'"
+
+# name is used for metrics and debug output.
+name: crowdsecurity/sshd-logs
+
+onsuccess: next_stage
+
+# pattern_syntax defines named sub-patterns reused across grok patterns.
+pattern_syntax:
+  SSHD_INVALID_USER: "Invalid user"
+  SSHD_AUTH_FAIL: "Failed (?:password|publickey)"
+
+# nodes is a list of child parser nodes, applied in order.
+nodes:
+  - grok:
+      # A named pattern loaded from the patterns/ directory.
+      pattern: "^%{SSHD_AUTH_FAIL} for(?: invalid user)? %{USERNAME:source_user} from %{IP:source_ip}"
+      apply_on: Line.Raw
+    statics:
+      - meta: log_type
+        value: ssh_failed-auth
+      - meta: source_ip
+        expression: "evt.Parsed.source_ip"
+
+# statics at the node level apply when any child node succeeds.
+statics:
+  - meta: service
+    value: ssh
+```
+
+### Key fields
+
+| Field | Required | Description |
+|---|---|---|
+| `stage` | yes | Which processing stage this parser belongs to |
+| `filter` | optional | Expression that must return `true` for the node to run |
+| `onsuccess` | yes | `next_stage` to advance the event, `continue` to keep processing |
+| `name` | optional | Identifier used for metrics and profiling |
+| `nodes` | optional | Child nodes forming a parser tree |
+| `grok` | optional | Grok pattern to extract fields |
+| `pattern_syntax` | optional | Named sub-patterns available within this parser |
+| `statics` | optional | Field assignments that run when the node succeeds |
+
+## Processing stages
+
+Stages give you control over the order of transformations. By convention CrowdSec uses three stages:
+
+**`s00-raw`** — initial triage. Parsers here identify the log source and set a `log_type` so later stages can filter precisely. No deep parsing happens here.
+
+**`s01-parse`** — main extraction. Parsers apply grok patterns to extract fields like `source_ip`, `http_status`, `url`, and `username` into `Parsed` and `Meta`.
+
+**`s02-enrich`** — enrichment. Parsers call enrichment plugins (e.g., `GeoIpCity`) to add geographic or threat-intelligence context. The enriched data lands in `Enriched` and is then copied into `Meta`.
+
+<Note>
+Stage names are just directory names. You can add your own stages (e.g., `s03-custom`) and they will be sorted alphabetically relative to the built-in ones.
+</Note>
+
+## Grok patterns
+
+Grok patterns are named regular expressions, similar to Logstash/Elasticsearch grok. You can reference a built-in pattern by `name` or write an inline `pattern`:
+
+```yaml
+# Reference a built-in named pattern
+grok:
+  name: "NGINXACCESS"
+  apply_on: Line.Raw
+
+# Inline pattern with field capture
+grok:
+  pattern: "^%{GREEDYDATA:request}\\?%{GREEDYDATA:http_args}$"
+  apply_on: evt.Parsed.request
+```
+
+`apply_on` points to the field to match against. Captured groups become entries in `evt.Parsed`.
+
+## Statics and enrichment
+
+Statics assign values to fields after a node succeeds. The source can be a literal `value` or an `expression` evaluated against the current `Event`:
+
+```yaml
+statics:
+  # Literal value
+  - meta: service
+    value: http
+
+  # Expression result
+  - meta: source_ip
+    expression: "evt.Parsed.source_ip"
+
+  # Call an enrichment plugin
+  - method: GeoIpCity
+    expression: evt.Meta.source_ip
+
+  # Copy enrichment output into Meta
+  - meta: IsoCode
+    expression: evt.Enriched.IsoCode
+```
+
+## Installing parsers from the Hub
+
+The CrowdSec Hub hosts hundreds of community-maintained parsers. Install them with `cscli`:
+
+```bash
+# Install a single parser
+cscli parsers install crowdsecurity/sshd-logs
+
+# Install multiple parsers
+cscli parsers install crowdsecurity/nginx-logs crowdsecurity/apache2-logs
+
+# List installed parsers
+cscli parsers list
+
+# List all available parsers (installed or not)
+cscli parsers list -a
+
+# Remove a parser
+cscli parsers remove crowdsecurity/sshd-logs
+```
+
+<Tip>
+Installing a **collection** (e.g., `cscli collections install crowdsecurity/sshd`) automatically installs the parsers and scenarios it depends on. Collections are the recommended way to get started.
+</Tip>
+
+## Writing a custom parser
+
+<Steps>
+  <Step title="Create the parser file">
+    Create a YAML file in the appropriate stage directory under your CrowdSec configuration:
+
+    ```bash
+    # Parser files live in /etc/crowdsec/parsers/<stage>/
+    touch /etc/crowdsec/parsers/s01-parse/myapp-logs.yaml
+    ```
+  </Step>
+
+  <Step title="Define the filter and grok pattern">
+    Write the filter so the parser only runs on relevant events, then add a grok pattern to extract fields:
+
+    ```yaml
+    stage: s01-parse
+    filter: "evt.Line.Labels.type == 'myapp'"
+    name: myorg/myapp-logs
+    onsuccess: next_stage
+
+    pattern_syntax:
+      MYAPP_STATUS: "[0-9]+"
+
+    nodes:
+      - grok:
+          pattern: "^%{TIMESTAMP_ISO8601:timestamp} %{LOGLEVEL:level} user=%{USERNAME:source_user} status=%{MYAPP_STATUS:status}$"
+          apply_on: Line.Raw
+        statics:
+          - meta: log_type
+            value: myapp_event
+
+    statics:
+      - meta: service
+        value: myapp
+      - meta: source_ip
+        expression: "evt.Parsed.source_user"
+    ```
+  </Step>
+
+  <Step title="Configure the log acquisition">
+    Tell CrowdSec where to read the logs. Add a source to your `acquis.yaml`:
+
+    ```yaml
+    filenames:
+      - /var/log/myapp/*.log
+    labels:
+      type: myapp
+    ```
+  </Step>
+
+  <Step title="Reload and verify">
+    Reload CrowdSec and confirm the parser is loaded:
+
+    ```bash
+    sudo systemctl reload crowdsec
+
+    # Check that events are being parsed correctly
+    cscli parsers list
+    ```
+
+    Use `cscli explain` to trace a log line through the parser pipeline and inspect which fields are extracted.
+  </Step>
+</Steps>
+
+<Warning>
+Parsers that set `onsuccess: next_stage` move the event forward and prevent later parsers in the same stage from running. Use `continue` when you want multiple parsers in a stage to apply to the same event.
+</Warning>

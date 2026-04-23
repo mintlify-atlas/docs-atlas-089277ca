@@ -1,0 +1,198 @@
+---
+title: "CrowdSec feature flags: enable experimental options"
+description: "Enable CrowdSec feature flags via CROWDSEC_FEATURE_ env vars or feature.yaml. Lists all flags, their state, and how to check which are currently active."
+---
+
+Feature flags allow you to opt in to experimental behaviors, performance optimizations, or capabilities that have not yet become the default. CrowdSec reads feature flags at startup from two sources: environment variables and the `feature.yaml` file. Both sources can be active simultaneously, and neither can be used to _disable_ a flag — only to enable it.
+
+## How flags are loaded
+
+Feature flags are evaluated early in the startup sequence, before `config.yaml` is fully parsed. The loading order is:
+
+<Steps>
+  <Step title="Environment variables">
+    CrowdSec scans all environment variables prefixed with `CROWDSEC_FEATURE_`. Each matching variable is lowercased, the prefix is stripped, and the result is used as the flag name. Only `true` or `false` are valid values.
+  </Step>
+  <Step title="feature.yaml">
+    CrowdSec reads `feature.yaml` from the same directory as `config.yaml` (typically `/etc/crowdsec/feature.yaml`). The file contains a YAML list of flag names to enable. Flags in this file cannot be disabled — they are unconditionally set to `true`.
+  </Step>
+</Steps>
+
+<Note>
+If an environment variable sets a flag to `false` and the flag is also listed in `feature.yaml`, the file wins and the flag is enabled. Environment variables cannot be used to disable a flag that is listed in `feature.yaml`.
+</Note>
+
+## Environment variable naming
+
+The environment variable prefix is `CROWDSEC_FEATURE_`. The flag name is uppercased and replaces underscores directly.
+
+```bash
+# Flag name: chunked_decisions_stream
+export CROWDSEC_FEATURE_CHUNKED_DECISIONS_STREAM=true
+
+# Flag name: re2_regexp_in_file_support
+export CROWDSEC_FEATURE_RE2_REGEXP_IN_FILE_SUPPORT=true
+```
+
+## feature.yaml format
+
+Create or edit `/etc/crowdsec/feature.yaml`. The file is a YAML list of feature flag names (lowercase, using underscores):
+
+```yaml
+# /etc/crowdsec/feature.yaml
+- chunked_decisions_stream
+- re2_regexp_in_file_support
+```
+
+If the file does not exist, CrowdSec starts normally with all flags in their default (disabled) state.
+
+---
+
+## Available feature flags
+
+<AccordionGroup>
+
+<Accordion title="chunked_decisions_stream">
+
+**Environment variable:** `CROWDSEC_FEATURE_CHUNKED_DECISIONS_STREAM=true`
+
+**Status:** Active
+
+Enables the chunked streaming protocol when the Local API sends decisions to bouncers. In chunked mode the LAPI streams decisions in discrete chunks rather than buffering the entire response. This improves memory usage and time-to-first-byte on installs with large decision sets.
+
+```yaml
+# feature.yaml
+- chunked_decisions_stream
+```
+
+</Accordion>
+
+<Accordion title="disable_http_retry_backoff">
+
+**Environment variable:** `CROWDSEC_FEATURE_DISABLE_HTTP_RETRY_BACKOFF=true`
+
+**Status:** Active
+
+Disables the exponential back-off applied when HTTP requests to the Central API fail. With this flag enabled, CrowdSec retries immediately rather than waiting between attempts. Intended for testing and debugging connectivity issues; not recommended for production.
+
+```yaml
+# feature.yaml
+- disable_http_retry_backoff
+```
+
+</Accordion>
+
+<Accordion title="re2_grok_support">
+
+**Environment variable:** `CROWDSEC_FEATURE_RE2_GROK_SUPPORT=true`
+
+**Status:** Deprecated on Linux (RE2 is the default on Linux), Active on other platforms
+
+Enables the RE2 regex engine for GROK pattern matching in parsers. RE2 provides linear-time guarantees and avoids catastrophic backtracking. On Linux, RE2 support has been promoted to the default and this flag is deprecated — enabling it produces a deprecation warning but still works. On non-Linux platforms where RE2 is not the default, enabling this flag opts in to the RE2 engine.
+
+```yaml
+# feature.yaml
+- re2_grok_support
+```
+
+<Warning>
+On Linux, this flag is deprecated. Use `re2_disable_grok_support` if you need to revert to the legacy engine (not recommended).
+</Warning>
+
+</Accordion>
+
+<Accordion title="re2_disable_grok_support">
+
+**Environment variable:** `CROWDSEC_FEATURE_RE2_DISABLE_GROK_SUPPORT=true`
+
+**Status:** Active (Linux only)
+
+Disables the RE2 engine for GROK patterns and reverts to the legacy regex engine. This flag is only available on Linux, where RE2 is enabled by default. Use this only as a temporary workaround if you encounter RE2 compatibility issues with a specific parser pattern.
+
+```yaml
+# feature.yaml
+- re2_disable_grok_support
+```
+
+</Accordion>
+
+<Accordion title="re2_regexp_in_file_support">
+
+**Environment variable:** `CROWDSEC_FEATURE_RE2_REGEXP_IN_FILE_SUPPORT=true`
+
+**Status:** Active
+
+Enables RE2 as the regex engine for the `RegexpInFile` expr-lang helper used in parser and scenario filters. The `RegexpInFile` helper tests a string against a list of patterns loaded from a file. RE2 guarantees linear-time matching, preventing potential denial-of-service via crafted input.
+
+```yaml
+# feature.yaml
+- re2_regexp_in_file_support
+```
+
+</Accordion>
+
+<Accordion title="papi_client">
+
+**Environment variable:** `CROWDSEC_FEATURE_PAPI_CLIENT=true`
+
+**Status:** Deprecated
+
+Enabled the Polling API (PAPI) client for receiving decisions from the CrowdSec Central API via a push model. PAPI is now enabled by default when valid Central API credentials are present, and this flag is no longer required. Enabling it produces a deprecation warning.
+
+</Accordion>
+
+<Accordion title="pprof_block_profile">
+
+**Environment variable:** `CROWDSEC_FEATURE_PPROF_BLOCK_PROFILE=true`
+
+**Status:** Active
+
+Enables Go's pprof block and mutex profiling endpoints. These profiles reveal goroutines blocked on synchronization primitives and can help diagnose throughput or latency regressions. The profiling data is expensive to collect and should only be enabled at the request of CrowdSec support or during active performance investigations.
+
+```yaml
+# feature.yaml
+- pprof_block_profile
+```
+
+<Warning>
+Do not enable this flag in production unless instructed by CrowdSec support. Block profiling has measurable overhead.
+</Warning>
+
+</Accordion>
+
+</AccordionGroup>
+
+---
+
+## Flag lifecycle
+
+Feature flags move through three states:
+
+| State | Behavior |
+|-------|----------|
+| **Active** | The flag is recognized, accepted, and the feature is enabled. An `Info`-level log message is emitted at startup. |
+| **Deprecated** | The flag is still accepted but a `Warning` is logged. The underlying behavior may already be the default, or the flag may be removed in a future release. |
+| **Retired** | The flag is no longer recognized. If set, an `Error` is logged and the flag is ignored. |
+
+When a flag is deprecated, the log message includes guidance on what has changed and whether any action is required.
+
+## Checking enabled flags
+
+To see which feature flags are currently active, run:
+
+```bash
+cscli config show
+```
+
+The output includes a `Feature flags` line listing the names of all enabled flags, or `none` if no flags are set.
+
+```bash
+# Example output excerpt
+Feature flags: chunked_decisions_stream, re2_regexp_in_file_support
+```
+
+You can also check the startup logs at `info` level — each enabled flag produces a log line of the form:
+
+```
+time="..." level=debug msg="Feature flag: chunked_decisions_stream=true (from config file). Enable chunked decisions stream"
+```

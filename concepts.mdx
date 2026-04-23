@@ -1,0 +1,334 @@
+---
+title: "CrowdSec concepts: engine, parsers, bouncers, and APIs"
+description: "Learn how the CrowdSec Security Engine, parsers, leaky bucket scenarios, decisions, bouncers, and the LAPI/CAPI work together to detect and block threats."
+---
+
+CrowdSec is built around a pipeline: raw log lines flow through parsers, are grouped into time-windowed scenarios (leaky buckets), and produce alerts when thresholds are crossed. Those alerts generate decisions — bans, captchas, or rate limits — which are distributed to remediation components (bouncers) running at the edge of your infrastructure. A Local API ties the components together on a single node, while the Central API connects your instance to the global threat-sharing network.
+
+<CardGroup cols={3}>
+  <Card title="Security Engine" icon="shield" href="#security-engine">
+    The core daemon that runs the full detection pipeline.
+  </Card>
+  <Card title="Parsers" icon="sliders" href="#parsers">
+    Turn raw log lines into structured events ready for analysis.
+  </Card>
+  <Card title="Scenarios" icon="wave-square" href="#scenarios-leaky-buckets">
+    Leaky bucket rules that detect attack patterns over time.
+  </Card>
+  <Card title="Alerts & Decisions" icon="bell" href="#alerts-and-decisions">
+    What the engine raises and what it decides to do about it.
+  </Card>
+  <Card title="Bouncers" icon="ban" href="#bouncers-remediation-components">
+    Enforcement agents that apply decisions at the firewall or app layer.
+  </Card>
+  <Card title="LAPI & CAPI" icon="network-wired" href="#local-api-lapi-and-central-api-capi">
+    APIs that coordinate local agents and connect to the global network.
+  </Card>
+</CardGroup>
+
+---
+
+## Detailed concepts
+
+<AccordionGroup>
+
+<Accordion title="Security Engine">
+
+The Security Engine (`crowdsec` daemon) is the central process that orchestrates the entire detection pipeline. It:
+
+- Reads log lines and HTTP requests from configured **acquisition** sources (files, syslog, Docker, journald, and more).
+- Passes events through the **parser** pipeline to produce structured objects.
+- Pours structured events into **scenario buckets** to detect attack patterns.
+- Emits **alerts** when a scenario bucket overflows.
+- Writes **decisions** to the Local API database based on configured profiles.
+- Registers with the **Central API** to share signals and receive the community blocklist.
+
+The engine also includes an **AppSec (WAF)** component that inspects HTTP requests in real time — independently of log files — using Coraza-powered rules to block OWASP Top 10 attacks before they reach your application.
+
+Configuration lives in `/etc/crowdsec/config.yaml`. Key paths:
+
+```yaml
+config_paths:
+  config_dir: /etc/crowdsec/
+  data_dir: /var/lib/crowdsec/data/
+  hub_dir: /etc/crowdsec/hub/
+crowdsec_service:
+  acquisition_path: /etc/crowdsec/acquis.yaml
+api:
+  server:
+    listen_uri: 127.0.0.1:8080
+    profiles_path: /etc/crowdsec/profiles.yaml
+```
+
+</Accordion>
+
+<Accordion title="Log Processor and acquisition">
+
+The **Log Processor** is the part of the Security Engine responsible for ingesting data. You configure it through `acquis.yaml` (or files in `acquis.d/`), specifying which sources to tail and what label to attach so the correct parser is selected.
+
+```yaml
+# /etc/crowdsec/acquis.yaml
+
+filenames:
+  - /var/log/nginx/*.log
+labels:
+  type: nginx
+---
+filenames:
+  - /var/log/auth.log
+  - /var/log/syslog
+labels:
+  type: syslog
+---
+filename: /var/log/apache2/*.log
+labels:
+  type: apache2
+```
+
+Supported source types include log files, journald, syslog, Docker containers, Kubernetes pods, S3 buckets, Kafka topics, and live HTTP streams for AppSec.
+
+</Accordion>
+
+<Accordion title="Parsers">
+
+Parsers transform raw log lines into structured `Event` objects that scenarios can reason about. Each parser is a YAML-defined `Node` that applies a filter, runs grok patterns to extract fields, and writes values into the event's `Parsed`, `Meta`, or `Enriched` dictionaries.
+
+Parsing runs through multiple **stages** (directories under `config/stage/`). Alphabetical order determines processing order. An event moves to the next stage only when a parser succeeds and sets `onsuccess: next_stage`.
+
+Example parser node for Nginx access logs:
+
+```yaml
+filter: "evt.Line.Labels.type == 'nginx'"
+onsuccess: next_stage
+name: crowdsecurity/nginx-logs
+nodes:
+  - grok:
+      name: "NGINXACCESS"
+      apply_on: Line.Raw
+      statics:
+        - meta: log_type
+          value: "http_access-log"
+  - grok:
+      name: "NGINXERROR"
+      apply_on: Line.Raw
+      statics:
+        - meta: log_type
+          value: "http_error-log"
+statics:
+  - meta: service
+    value: http
+```
+
+Parsers can also call **enrichment plugins** to add geographic data (GeoIP), reverse DNS lookups, or custom data to an event before it is poured into a scenario bucket.
+
+Install community parsers from the Hub:
+
+```bash
+sudo cscli parsers install crowdsecurity/nginx-logs
+sudo cscli parsers install crowdsecurity/sshd-logs
+```
+
+</Accordion>
+
+<Accordion title="Scenarios (leaky buckets)">
+
+Scenarios are the detection rules in CrowdSec. They are implemented as **leaky buckets**: structured events are poured into a bucket, and when the bucket fills faster than it drains (or a fixed count is reached), it **overflows** — generating an alert.
+
+A single scenario configuration creates many bucket instances simultaneously, one per unique `stackkey` value (typically `source_ip`). Events with the same `stackkey` go into the same bucket instance.
+
+**Bucket types:**
+
+| Type | Behavior |
+|------|----------|
+| `leaky` | Standard: overflows when capacity is exceeded and the leak rate is not fast enough. |
+| `trigger` | `capacity: 0` — any single matching event causes an immediate overflow. |
+| `counter` | Counts events for a fixed `duration`, then emits a report event. |
+| `uniq` | Like `leaky` but ignores duplicate values (enforces uniqueness per event property). |
+| `bayesian` | Uses Bayesian inference instead of counting; overflows when a posterior probability threshold is crossed. |
+
+Example: SSH brute-force scenario
+
+```yaml
+type: leaky
+name: crowdsecurity/ssh-bf
+description: "Detect brute force on ssh services"
+filter: "evt.Meta.log_type == 'ssh_failed-auth'"
+leakspeed: "10s"
+capacity: 5
+stackkey: "source_ip"
+labels:
+  service: ssh
+  type: bruteforce
+  remediation: true
+```
+
+This bucket holds 5 events and leaks one every 10 seconds. If a single source IP generates 6 failed SSH authentication events faster than they leak out, the bucket overflows and an alert is raised.
+
+Install community scenarios from the Hub:
+
+```bash
+sudo cscli scenarios install crowdsecurity/ssh-bf
+sudo cscli scenarios install crowdsecurity/http-crawl-non_statics
+```
+
+</Accordion>
+
+<Accordion title="Alerts and decisions">
+
+An **alert** is created whenever a scenario bucket overflows. It records the scenario name, the offending value (e.g., source IP), the scope (IP or IP range), the timestamp, and contextual metadata from the matched events.
+
+A **decision** is what CrowdSec does in response to an alert. Decisions are derived from **profiles** (`/etc/crowdsec/profiles.yaml`). Each profile defines:
+
+- A filter expression that matches alerts (e.g., `Alert.Remediation == true && Alert.GetScope() == "Ip"`).
+- The decision type and duration (e.g., `ban` for 4 hours).
+- Optional notification channels (Slack, email, Splunk, HTTP webhook).
+
+The default profiles:
+
+```yaml
+name: default_ip_remediation
+filters:
+  - Alert.Remediation == true && Alert.GetScope() == "Ip"
+decisions:
+  - type: ban
+    duration: 4h
+on_success: break
+---
+name: default_range_remediation
+filters:
+  - Alert.Remediation == true && Alert.GetScope() == "Range"
+decisions:
+  - type: ban
+    duration: 4h
+on_success: break
+```
+
+Use `cscli` to inspect alerts and decisions:
+
+```bash
+sudo cscli alerts list
+sudo cscli decisions list
+sudo cscli decisions add --ip 1.2.3.4 --duration 24h --reason "manual block"
+sudo cscli decisions delete --ip 1.2.3.4
+```
+
+</Accordion>
+
+<Accordion title="Bouncers (Remediation Components)">
+
+**Bouncers** are standalone agents that poll the Local API for active decisions and enforce them. They run independently of the Security Engine — a bouncer does not need to be on the same host as the engine, as long as it can reach the Local API.
+
+Each bouncer registers with an API key and specifies which decisions it wants to consume. The enforcement mechanism varies by bouncer type:
+
+| Bouncer | Enforcement point |
+|---------|------------------|
+| `crowdsec-firewall-bouncer` | `iptables` or `nftables` rules |
+| `crowdsec-nginx-bouncer` | Nginx `access_by_lua` / ModSecurity |
+| `crowdsec-traefik-bouncer` | Traefik middleware plugin |
+| `crowdsec-cloudflare-bouncer` | Cloudflare IP lists |
+| `crowdsec-aws-waf-bouncer` | AWS WAF IP sets |
+
+Browse the full catalog at [hub.crowdsec.net](https://hub.crowdsec.net).
+
+List registered bouncers and their last pull time:
+
+```bash
+sudo cscli bouncers list
+```
+
+</Accordion>
+
+<Accordion title="Local API (LAPI)">
+
+The **Local API** (LAPI) is the HTTP server embedded in the Security Engine, listening on `127.0.0.1:8080` by default. It is the central coordination point for a single deployment node:
+
+- **Agents** (Log Processors) authenticate with the LAPI and push alerts to it.
+- **Bouncers** authenticate with the LAPI and poll it for active decisions.
+- **`cscli`** communicates exclusively through the LAPI to read and write alerts, decisions, and configuration.
+
+The LAPI stores state in a local SQLite database (`/var/lib/crowdsec/data/crowdsec.db` by default). PostgreSQL and MySQL are supported for multi-agent deployments.
+
+In distributed architectures, a single LAPI instance can serve multiple Log Processor agents running on different hosts. Agents register as "machines":
+
+```bash
+sudo cscli machines list
+sudo cscli machines add my-agent --auto
+```
+
+</Accordion>
+
+<Accordion title="Central API (CAPI) and the community blocklist">
+
+The **Central API** (CAPI) is CrowdSec's global cloud service. Your local Security Engine connects to it to:
+
+1. **Push signals** — anonymized metadata about detected attacks, contributing to the community intelligence pool.
+2. **Pull the community blocklist** — a curated list of IPs confirmed as malicious by the community, updated continuously.
+
+The community blocklist is pushed to your LAPI and distributed to all registered bouncers automatically. This means your infrastructure proactively blocks known-bad IPs even before they attempt to attack you directly.
+
+Register your engine with the CAPI:
+
+```bash
+sudo cscli capi register
+sudo systemctl restart crowdsec
+```
+
+Check CAPI connectivity:
+
+```bash
+sudo cscli capi status
+```
+
+CAPI credentials are stored in `/etc/crowdsec/online_api_credentials.yaml`. Signal sharing is pseudonymous — only scenario names, timestamps, and IP addresses are transmitted; no log content is ever shared.
+
+</Accordion>
+
+<Accordion title="Hub">
+
+The **Hub** ([hub.crowdsec.net](https://hub.crowdsec.net)) is CrowdSec's community catalog of reusable detection content. All items are published under the MIT license.
+
+Hub content is organized into four types:
+
+| Type | Purpose |
+|------|---------|
+| **Collections** | Curated bundles of parsers and scenarios for a specific service (e.g., `crowdsecurity/nginx`, `crowdsecurity/sshd`). |
+| **Parsers** | Log format parsers for individual services or protocols. |
+| **Scenarios** | Attack detection rules for specific threat patterns. |
+| **AppSec rules** | WAF rules for HTTP-level threat detection. |
+
+Common `cscli hub` commands:
+
+```bash
+# List all installed hub items
+sudo cscli hub list
+
+# Search and install a collection
+sudo cscli collections install crowdsecurity/nginx
+
+# Update all hub items
+sudo cscli hub update
+sudo cscli hub upgrade
+```
+
+Collections are the recommended starting point — installing one collection pulls in all the parsers and scenarios needed to protect a given service.
+
+</Accordion>
+
+</AccordionGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Get started" icon="rocket" href="/quickstart">
+    Install CrowdSec, add a bouncer, and see your first alert.
+  </Card>
+  <Card title="Configure acquisition" icon="file-lines" href="/configuration/acquisition">
+    Add log sources and tune what CrowdSec reads.
+  </Card>
+  <Card title="Browse the Hub" icon="store" href="/detection/hub">
+    Find parsers and scenarios for your stack.
+  </Card>
+  <Card title="Remediation bouncers" icon="ban" href="/remediation/bouncers">
+    Deploy and configure enforcement at the firewall or application layer.
+  </Card>
+</CardGroup>

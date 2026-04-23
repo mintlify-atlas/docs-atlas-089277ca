@@ -1,0 +1,75 @@
+---
+title: "CrowdSec: Open-Source Collaborative Security Engine"
+description: "CrowdSec is a free, open-source security engine that detects and blocks malicious IPs using crowdsourced threat intelligence, combining IDS/IPS with a WAF."
+---
+
+CrowdSec is an open-source, participative security solution that protects your infrastructure from malicious IPs by analyzing behavior patterns in your logs and HTTP requests. Every installation contributes to and benefits from a shared community blocklist — when one user detects an attack, all users are protected.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install CrowdSec and block your first threat in under 5 minutes.
+  </Card>
+  <Card title="Core Concepts" icon="lightbulb" href="/concepts">
+    Understand parsers, scenarios, decisions, and the crowdsourced model.
+  </Card>
+  <Card title="Installation" icon="download" href="/installation/linux">
+    Deploy on Linux, Docker, Kubernetes, or Windows.
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/overview">
+    Explore the Local API for bouncers and agent integrations.
+  </Card>
+</CardGroup>
+
+## How CrowdSec works
+
+CrowdSec operates through a pipeline: it reads log sources, parses events through configurable parsers, groups related events into scenarios (leaky buckets), and raises alerts when thresholds are exceeded. Decisions (bans, captchas, rate limits) are distributed to **bouncers** — remediation components running at the network edge, application layer, or firewall level.
+
+<CardGroup cols={3}>
+  <Card title="Detection" icon="shield-halved" href="/detection/parsers">
+    Parse logs and detect attacks with community-maintained scenarios.
+  </Card>
+  <Card title="Remediation" icon="ban" href="/remediation/bouncers">
+    Block threats at the firewall, Nginx, Traefik, or application layer.
+  </Card>
+  <Card title="Hub" icon="store" href="/detection/hub">
+    Browse 200+ community parsers, scenarios, and collections.
+  </Card>
+</CardGroup>
+
+## Key capabilities
+
+<AccordionGroup>
+  <Accordion title="Community blocklist">
+    Every CrowdSec instance automatically receives a curated blocklist of IPs identified as malicious by the community. Proactive blocking starts from the moment you install CrowdSec — no manual rule-writing required.
+  </Accordion>
+  <Accordion title="Behavior-based detection">
+    Detection uses leaky bucket scenarios: events flow into time-windowed buckets, and when thresholds are exceeded (e.g., 10 failed SSH logins in 30 seconds), an alert is raised. Scenarios are written in YAML and shared on the Hub.
+  </Accordion>
+  <Accordion title="Application Security (WAF)">
+    The built-in AppSec component inspects HTTP requests in real time using Coraza-powered rules, blocking SQL injection, XSS, path traversal, and other OWASP Top 10 attacks before they reach your application.
+  </Accordion>
+  <Accordion title="Distributed architecture">
+    The Local API (LAPI) lets multiple CrowdSec agents report to a single decision store. The Central API (CAPI) connects your instance to the global CrowdSec network for threat sharing and community blocklist access.
+  </Accordion>
+</AccordionGroup>
+
+## Get started
+
+<Steps>
+  <Step title="Install CrowdSec">
+    Install the security engine on your server using the official package repository or Docker image.
+  </Step>
+  <Step title="Configure log sources">
+    Point CrowdSec at your log files, Docker containers, or syslog streams via `acquis.yaml`.
+  </Step>
+  <Step title="Install a bouncer">
+    Deploy a remediation component (firewall bouncer, Nginx bouncer, etc.) to enforce decisions.
+  </Step>
+  <Step title="Monitor your security">
+    Use `cscli` to view alerts, decisions, and metrics — or connect to the CrowdSec Console for a visual dashboard.
+  </Step>
+</Steps>
+
+<Note>
+  CrowdSec is free and open source under the MIT license. The [CrowdSec Hub](https://hub.crowdsec.net) provides hundreds of community-maintained parsers and scenarios, also under MIT.
+</Note>

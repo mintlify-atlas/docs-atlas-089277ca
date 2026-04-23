@@ -1,0 +1,278 @@
+---
+title: "profiles.yaml: map CrowdSec alerts to ban decisions"
+description: "Reference for profiles.yaml — maps CrowdSec alerts to decisions. Covers filter expressions, decision types, duration_expr, notifications, and on_success."
+---
+
+When a scenario fires, the CrowdSec detection agent raises an alert and sends it to the Local API. The LAPI then evaluates the alert against a list of _profiles_ to decide what remediation action, if any, to apply. Each profile specifies a filter expression, one or more decisions, optional notifications, and a control-flow directive that determines whether subsequent profiles should also be evaluated.
+
+Profiles are defined in `/etc/crowdsec/profiles.yaml`, which is referenced in `config.yaml` under `api.server.profiles_path`. Like other CrowdSec configuration files, profiles support a `.local` override file (`profiles.yaml.local`) that is prepended before the base file at load time.
+
+## Default profiles
+
+The shipped default file defines two profiles: one for IP-scoped alerts and one for range-scoped alerts.
+
+```yaml
+name: default_ip_remediation
+filters:
+  - Alert.Remediation == true && Alert.GetScope() == "Ip"
+decisions:
+  - type: ban
+    duration: 4h
+on_success: break
+
+---
+name: default_range_remediation
+filters:
+  - Alert.Remediation == true && Alert.GetScope() == "Range"
+decisions:
+  - type: ban
+    duration: 4h
+on_success: break
+```
+
+---
+
+## Profile structure
+
+```yaml
+name: <string>           # unique identifier for this profile
+debug: <bool>            # optional: log detailed evaluation info
+filters:                 # one or more filter expressions (OR logic)
+  - <expr>
+decisions:               # list of decisions to create on match
+  - type: <string>
+    duration: <string>
+    scope: <string>
+    value: <string>
+duration_expr: <string>  # optional: override duration dynamically
+notifications:           # optional: notification plugins to invoke
+  - <plugin_name>
+on_success: break | continue   # what to do after this profile matches
+on_failure: break | continue   # what to do if no filter matches
+```
+
+Each field is described in detail below.
+
+---
+
+## `name`
+
+A unique, human-readable label for the profile. The name appears in logs and metrics.
+
+```yaml
+name: aggressive_ban
+```
+
+---
+
+## `filters`
+
+A list of [expr-lang](https://github.com/expr-lang/expr) boolean expressions evaluated against the `Alert` object. The filters in a single profile are combined with **OR** logic — the profile matches if _any_ filter returns `true`.
+
+```yaml
+filters:
+  - Alert.Remediation == true && Alert.GetScope() == "Ip"
+```
+
+### Available Alert fields and methods
+
+| Expression | Type | Description |
+|-----------|------|-------------|
+| `Alert.Remediation` | bool | `true` when the triggering scenario has remediation enabled. |
+| `Alert.GetScope()` | string | Scope of the decision: `"Ip"`, `"Range"`, `"Country"`, `"As"`, etc. |
+| `Alert.GetValue()` | string | The value being sanctioned (the IP, range, or country code). |
+| `Alert.GetScenario()` | string | Name of the scenario that fired (e.g., `crowdsecurity/ssh-bf`). |
+| `Alert.GetEventsCount()` | int | Number of events that triggered the scenario. |
+
+### Example filters
+
+```yaml
+# Only apply to SSH brute-force scenarios
+filters:
+  - Alert.Remediation == true && Alert.GetScenario() == "crowdsecurity/ssh-bf"
+
+# Match any IP-scoped alert with more than 50 events
+filters:
+  - Alert.Remediation == true && Alert.GetScope() == "Ip" && Alert.GetEventsCount() > 50
+
+# Multiple conditions with OR — match IPs or ranges
+filters:
+  - Alert.Remediation == true && Alert.GetScope() == "Ip"
+  - Alert.Remediation == true && Alert.GetScope() == "Range"
+```
+
+---
+
+## `decisions`
+
+A list of decision objects created when the profile matches. Each decision is pushed to the database and served to bouncers.
+
+```yaml
+decisions:
+  - type: ban
+    duration: 4h
+```
+
+### Decision fields
+
+<ParamField body="type" type="string" required>
+  The remediation action. Common values:
+
+  | Type | Behavior |
+  |------|----------|
+  | `ban` | Block the IP entirely. The standard action for most bouncers. |
+  | `captcha` | Serve a CAPTCHA challenge. Requires a captcha-capable bouncer. |
+  | `throttle` | Rate-limit requests. Requires a rate-limiting bouncer. |
+  | Custom | Any string your bouncer understands (e.g., `bypass`, `allow`). |
+</ParamField>
+
+<ParamField body="duration" type="string" required>
+  How long the decision is valid. Accepts Go duration strings: `30m`, `4h`, `24h`, `7d` is not valid — use `168h` for 7 days.
+</ParamField>
+
+<ParamField body="scope" type="string">
+  Override the decision scope. Defaults to the scope from the alert (`Ip`, `Range`, etc.).
+</ParamField>
+
+<ParamField body="value" type="string">
+  Override the decision value (the IP or range being banned). Defaults to the value from the alert.
+</ParamField>
+
+---
+
+## `duration_expr`
+
+An optional expr-lang expression that dynamically computes the decision duration. When set, it overrides the static `duration` field on each decision in the list.
+
+```yaml
+decisions:
+  - type: ban
+    duration: 4h
+duration_expr: "Sprintf('%dh', (GetDecisionsCount(Alert.GetValue()) + 1) * 4)"
+```
+
+In this example, a first offence results in a 4-hour ban, a second offence in 8 hours, a third in 12 hours, and so on — using the current count of decisions already recorded for that IP.
+
+### Available helpers in `duration_expr`
+
+| Function | Description |
+|----------|-------------|
+| `GetDecisionsCount(value string) int` | Returns the number of active decisions for the given value. |
+| `Sprintf(format string, ...) string` | Standard Go-style string formatting. |
+
+---
+
+## `notifications`
+
+A list of notification plugin names to invoke when the profile matches. Each name must correspond to a configured notification plugin in `/etc/crowdsec/notifications/`.
+
+```yaml
+notifications:
+  - slack_default
+  - email_default
+```
+
+Enable a plugin by configuring its YAML file in the notifications directory. The plugin name is the base name of its configuration file (e.g., `slack.yaml` → `slack_default` if that is the configured name inside the file).
+
+```yaml
+# Uncomment to enable:
+# notifications:
+#   - slack_default    # configure in /etc/crowdsec/notifications/slack.yaml
+#   - splunk_default   # configure in /etc/crowdsec/notifications/splunk.yaml
+#   - http_default     # configure in /etc/crowdsec/notifications/http.yaml
+#   - email_default    # configure in /etc/crowdsec/notifications/email.yaml
+```
+
+---
+
+## `on_success`
+
+Controls what happens after this profile **matches** (at least one filter is true and decisions are created).
+
+| Value | Behavior |
+|-------|----------|
+| `break` | Stop evaluating further profiles. This profile is the final word. |
+| `continue` | Continue evaluating subsequent profiles. |
+
+```yaml
+on_success: break
+```
+
+Use `break` (the default) for most profiles to avoid redundant decisions. Use `continue` when you want multiple profiles to each add decisions or trigger notifications for the same alert — for example, one profile applies the ban decision and another sends a notification.
+
+---
+
+## `on_failure`
+
+Controls what happens when this profile does **not** match (all filters return false).
+
+| Value | Behavior |
+|-------|----------|
+| `continue` | Move on to the next profile (default). |
+| `break` | Stop evaluating further profiles without applying any decision. |
+
+```yaml
+on_failure: continue
+```
+
+---
+
+## Advanced: multi-profile chaining
+
+Profiles are evaluated in file order. You can chain profiles to apply different decisions based on escalating criteria:
+
+```yaml
+# First profile: short ban for first-time offenders
+name: first_offense
+filters:
+  - Alert.Remediation == true && Alert.GetScope() == "Ip" && GetDecisionsCount(Alert.GetValue()) == 0
+decisions:
+  - type: ban
+    duration: 1h
+on_success: break
+
+---
+# Second profile: longer ban for repeat offenders
+name: repeat_offense
+filters:
+  - Alert.Remediation == true && Alert.GetScope() == "Ip" && GetDecisionsCount(Alert.GetValue()) > 0
+decisions:
+  - type: ban
+    duration: 24h
+notifications:
+  - slack_default
+on_success: break
+
+---
+# Fallback: catch-all for range-scoped alerts
+name: range_remediation
+filters:
+  - Alert.Remediation == true && Alert.GetScope() == "Range"
+decisions:
+  - type: ban
+    duration: 4h
+on_success: break
+```
+
+<Tip>
+The `GetDecisionsCount()` helper queries the database for active decisions at the time the profile is evaluated. This allows you to implement escalating bans without any external state.
+</Tip>
+
+---
+
+## Simulation mode
+
+When a scenario is placed in simulation mode (via `simulation.yaml` or `cscli simulation enable <scenario>`), its alerts still flow through profiles but no decisions are written to the database or served to bouncers. Simulation mode is useful for testing new scenarios or profiles without impacting live traffic.
+
+```yaml
+# /etc/crowdsec/simulation.yaml
+simulation: false
+# exclusions:
+#   - crowdsecurity/ssh-bf
+```
+
+Set `simulation: true` to simulate all scenarios, or list individual scenario names under `exclusions` to simulate only those.
+
+<Note>
+The `debug: true` field on a profile logs the result of every filter expression as it is evaluated, including which expression matched and the values of all fields. This is useful when troubleshooting unexpected profile behavior.
+</Note>

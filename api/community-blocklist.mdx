@@ -1,0 +1,145 @@
+---
+title: "Community blocklist: crowdsourced IP threat intelligence"
+description: "The CrowdSec community blocklist aggregates attack signals from nodes worldwide and distributes curated malicious IPs to your bouncers automatically."
+---
+
+The community blocklist is the primary benefit of connecting your CrowdSec installation to the Central API. It aggregates detection signals from thousands of CrowdSec installations around the world, filters them through statistical validation, and produces a curated list of IP addresses that are actively attacking real infrastructure. Your LAPI downloads this list automatically and makes it available to your bouncers through the standard decisions stream — no additional configuration is needed once CAPI is connected.
+
+## How the community blocklist reaches your bouncers
+
+```
+[Global CrowdSec network]
+        |
+   [CAPI servers]  <- aggregates and validates signals from all nodes
+        |
+   pull every ~2h
+        |
+   [Your LAPI]  <- stores decisions with origin=CAPI
+        |
+   stream /v1/decisions/stream
+        |
+   [Your bouncers]  <- enforce bans at the edge
+```
+
+1. Millions of CrowdSec nodes worldwide push attack signals to CAPI.
+2. CAPI aggregates and validates the signals, producing a blocklist of confirmed attackers.
+3. Your LAPI pulls the blocklist approximately every two hours and stores the IPs as decisions with `origin: CAPI`.
+4. Your bouncers receive these decisions through the normal `/v1/decisions/stream` endpoint on their next poll.
+
+## Update frequency
+
+The pull interval is approximately **every 2 hours**, with a random offset of up to 5 minutes added to spread load across the network. The exact schedule is logged at startup:
+
+```
+INFO[...] Start pull from CrowdSec Central API (interval: 1h58m once, then 2h0m)
+```
+
+The first pull may happen slightly earlier than 2 hours due to the randomised initial interval.
+
+If you need to force an immediate refresh, restart the CrowdSec service:
+
+```bash
+sudo systemctl restart crowdsec
+```
+
+## Checking which IPs are blocked
+
+To see all decisions currently active on your instance (including those from the community blocklist):
+
+```bash
+# All active decisions
+cscli decisions list
+
+# Only community blocklist decisions
+cscli decisions list --origin CAPI
+
+# Check a specific IP
+cscli decisions list --ip 1.2.3.4
+```
+
+You can also query the LAPI decisions endpoint directly:
+
+```bash
+curl "http://127.0.0.1:8080/v1/decisions?origins=CAPI" \
+  -H "X-Api-Key: <bouncer-key>"
+```
+
+## Inspecting blocklist alerts
+
+Each community blocklist pull creates an internal alert in LAPI that you can inspect:
+
+```bash
+cscli alerts list --scope CAPI
+```
+
+The alert message summarises the update, for example:
+
+```
+update : +1250/-30 IPs
+```
+
+This shows 1,250 new IPs were added and 30 expired in that pull.
+
+## Disabling or filtering the community blocklist
+
+### Disable pulling entirely
+
+Set `pull.community: false` in `config.yaml` to stop pulling the community blocklist. This does not affect decisions you created manually or from subscribed blocklists.
+
+```yaml
+api:
+  server:
+    online_client:
+      pull:
+        community: false
+        blocklists: true  # keep subscribed blocklist pulls
+```
+
+### Filter specific IPs from the blocklist
+
+If the community blocklist blocks an IP you need to allow (e.g. a trusted scanner or monitoring service), add it to an allowlist:
+
+```bash
+# Create an allowlist and add an entry
+cscli allowlists create trusted-scanners --description "IPs we trust"
+cscli allowlists add trusted-scanners 203.0.113.5
+
+# Or add a CIDR range
+cscli allowlists add trusted-scanners 198.51.100.0/24
+```
+
+Allowlisted IPs are excluded from blocklist decisions as they are pulled from CAPI. Existing decisions for allowlisted IPs are also expired automatically.
+
+<Note>
+  The older `capi_whitelists_path` configuration is deprecated. Use centralised allowlists with `cscli allowlists` instead.
+</Note>
+
+## Premium and third-party blocklists
+
+In addition to the free community blocklist, the [CrowdSec console](https://app.crowdsec.net) provides access to premium curated blocklists by category (e.g. scanners, TOR exit nodes, VPN providers, known malware C2 servers). These are managed as subscribed blocklist links delivered via CAPI.
+
+<Steps>
+  <Step title="Enroll in the console">
+    ```bash
+    cscli console enroll <enrollment-key>
+    ```
+  </Step>
+  <Step title="Browse and subscribe to blocklists">
+    Go to **Blocklists** in the console and subscribe to any list. LAPI will begin pulling it on the next CAPI sync.
+  </Step>
+  <Step title="Verify the blocklist is being pulled">
+    ```bash
+    cscli decisions list --origin lists
+    ```
+  </Step>
+</Steps>
+
+Subscribed blocklists appear as decisions with `origin: lists` and `scenario: <blocklist-name>`.
+
+## Privacy considerations
+
+The community blocklist contains only IP addresses. No hostnames, URLs, or personal data are included. The IPs in the list have been submitted by other CrowdSec users as sources of attacks and validated statistically — they are not pulled from passive reputation databases.
+
+Your LAPI does not send which blocklist IPs you receive to any third party. The pull is a one-way download.
+
+For outbound signal sharing (what your node sends to CAPI), see [Central API overview](/api/capi-overview) and the sharing controls described there.

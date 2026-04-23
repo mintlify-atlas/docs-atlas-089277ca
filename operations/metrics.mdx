@@ -1,0 +1,254 @@
+---
+title: "Monitor CrowdSec with Prometheus metrics and Grafana"
+description: "Monitor CrowdSec with its Prometheus endpoint. Learn which metrics to track, how to view them with cscli, and how to scrape and graph them in Grafana."
+---
+
+CrowdSec exposes a Prometheus endpoint that lets you monitor parsing throughput, bucket activity, active decisions, bouncer pull rates, and LAPI request volume. The endpoint is served by the Local API process at `http://127.0.0.1:6060/metrics` by default. You can query it directly, scrape it with a Prometheus server, or view a formatted summary using `cscli metrics`.
+
+## Prometheus configuration
+
+The endpoint is controlled by the `prometheus` section of `/etc/crowdsec/config.yaml`:
+
+```yaml
+prometheus:
+  enabled: true
+  level: full         # none | aggregated | full
+  listen_addr: 127.0.0.1
+  listen_port: 6060
+```
+
+| Field | Description |
+|---|---|
+| `enabled` | Toggle the endpoint on or off |
+| `level` | `none` disables all metrics; `aggregated` strips per-parser/bouncer detail; `full` (default) exposes everything |
+| `listen_addr` | Address the endpoint binds to |
+| `listen_port` | Port the endpoint listens on |
+
+<Note>
+To make the endpoint reachable by an external Prometheus server, change `listen_addr` to `0.0.0.0` or the machine's interface IP and ensure firewall rules allow access from the scraper host.
+</Note>
+
+## Viewing metrics with cscli
+
+`cscli metrics` fetches the Prometheus endpoint and presents the data in formatted tables. It does not require Prometheus to be running.
+
+<Tabs>
+  <Tab title="All metrics">
+    ```bash
+    # Show all metric sections (empty tables are hidden)
+    cscli metrics
+    ```
+  </Tab>
+  <Tab title="Specific sections">
+    ```bash
+    # Show only acquisition and parser metrics
+    cscli metrics show acquisition parsers
+
+    # Use the "engine" alias (acquisition, parsers, scenarios, stash, whitelists)
+    cscli metrics show engine
+
+    # Use the "lapi" alias (alerts, decisions, lapi, lapi-bouncer, lapi-decisions, lapi-machine)
+    cscli metrics show lapi
+
+    # Use the "appsec" alias (appsec-engine, appsec-rule)
+    cscli metrics show appsec
+    ```
+  </Tab>
+  <Tab title="Remote LAPI">
+    ```bash
+    # Connect to a different LAPI endpoint
+    cscli metrics --url http://192.168.1.10:6060/metrics
+    ```
+  </Tab>
+  <Tab title="JSON output">
+    ```bash
+    cscli metrics show acquisition parsers -o json
+    ```
+  </Tab>
+</Tabs>
+
+### Listing available metric types
+
+```bash
+cscli metrics list
+```
+
+This lists all named metric sections with their titles and descriptions.
+
+## Key metric sections
+
+<AccordionGroup>
+
+<Accordion title="acquisition — Log source throughput">
+
+Tracks lines read, parsed, unparsed, poured to buckets, and whitelisted per datasource.
+
+**Prometheus metrics**
+
+| Metric name | Type | Description |
+|---|---|---|
+| `cs_parser_hits_total` | Counter | Total events that entered the parser stage, per source |
+| `cs_parser_hits_ok_total` | Counter | Total events successfully parsed |
+| `cs_parser_hits_ko_total` | Counter | Total events that failed parsing |
+| `cs_bucket_poured_total` | Counter | Events poured into at least one bucket, per source |
+
+**What to watch**
+
+- `Lines read = 0` for a source means the acquisition is misconfigured or the log file is inactive.
+- `Lines parsed = 0` while `Lines read > 0` means no parser matched — check that the right collection is installed.
+- `Lines unparsed > 0` is normal; CrowdSec only processes relevant log lines.
+
+</Accordion>
+
+<Accordion title="parsers — Per-parser hit rates">
+
+Tracks hits, parsed, and unparsed counts for each individual parser node.
+
+**Prometheus metrics**
+
+| Metric name | Type | Description |
+|---|---|---|
+| `cs_node_hits_total` | Counter | Total times a parser node was evaluated |
+| `cs_node_hits_ok_total` | Counter | Successful parse evaluations |
+| `cs_node_hits_ko_total` | Counter | Failed parse evaluations |
+
+</Accordion>
+
+<Accordion title="scenarios — Bucket lifecycle">
+
+Tracks the lifecycle of leaky buckets (instantiation, overflow, underflow, cancellation).
+
+**Prometheus metrics**
+
+| Metric name | Type | Description |
+|---|---|---|
+| `cs_bucket_instantiation_total` | Counter | Buckets created per scenario |
+| `cs_bucket_overflowed_total` | Counter | Bucket overflows (alert triggered) per scenario |
+| `cs_bucket_underflowed_total` | Counter | Buckets that expired without overflowing |
+| `cs_bucket_canceled_total` | Counter | Buckets canceled (e.g. by whitelists) |
+| `cs_buckets` | Gauge | Current number of active buckets per scenario |
+
+A high overflow rate for a scenario means it is actively detecting attacks.
+
+</Accordion>
+
+<Accordion title="decisions — Active enforcement">
+
+Reflects the current number of active decisions tracked by LAPI.
+
+**Prometheus metrics**
+
+| Metric name | Type | Description |
+|---|---|---|
+| `cs_active_decisions` | Gauge | Current active decisions by reason, origin, and action |
+| `cs_alerts` | Gauge | Current alert count excluding CAPI, by reason |
+
+</Accordion>
+
+<Accordion title="lapi — API request volume">
+
+Tracks the number of requests hitting each LAPI route.
+
+**Prometheus metrics**
+
+| Metric name | Type | Description |
+|---|---|---|
+| `cs_lapi_route_requests_total` | Counter | Requests per route and HTTP method |
+| `cs_lapi_machine_requests_total` | Counter | Requests grouped by machine name |
+| `cs_lapi_bouncer_requests_total` | Counter | Requests grouped by bouncer name |
+| `cs_lapi_decisions_ok_total` | Counter | Bouncer pulls that returned decisions |
+| `cs_lapi_decisions_ko_total` | Counter | Bouncer pulls that returned no decisions |
+| `cs_lapi_request_duration_seconds` | Histogram | LAPI response time distribution |
+
+</Accordion>
+
+<Accordion title="bouncers — Remediation traffic">
+
+Shows blocked traffic volumes reported by bouncers (IPs blocked, bytes dropped, etc.), broken down by origin (CAPI community blocklist, cscli manual decisions, engine-triggered decisions).
+
+Bouncer metrics are stored in the LAPI database and displayed per-bouncer.
+
+</Accordion>
+
+<Accordion title="whitelists — Whitelist hit rates">
+
+Tracks how often whitelist nodes are hit and how many events they suppress.
+
+| Metric name | Type | Description |
+|---|---|---|
+| `cs_node_wl_hits_total` | Counter | Times a whitelist was evaluated |
+| `cs_node_wl_hits_ok_total` | Counter | Events suppressed by a whitelist |
+
+</Accordion>
+
+<Accordion title="appsec-engine and appsec-rule — WAF metrics">
+
+Tracks HTTP request processing by the AppSec (WAF) component.
+
+| Metric name | Type | Description |
+|---|---|---|
+| `cs_appsec_reqs_total` | Counter | Total HTTP requests processed by the AppSec engine |
+| `cs_appsec_block_total` | Counter | Requests blocked by the WAF |
+| `cs_appsec_rule_hits` | Counter | Individual rule trigger counts |
+
+</Accordion>
+
+</AccordionGroup>
+
+## Scraping with Prometheus
+
+Add a scrape job to your `prometheus.yml`:
+
+```yaml
+scrape_configs:
+  - job_name: crowdsec
+    static_configs:
+      - targets:
+          - "127.0.0.1:6060"
+    metrics_path: /metrics
+    scrape_interval: 30s
+```
+
+If your Prometheus server is on a different host, replace `127.0.0.1` with the CrowdSec machine's IP and update `listen_addr` in `config.yaml` accordingly.
+
+<Tip>
+If you run CrowdSec inside a container, expose port 6060 and use the container's IP or host network in the scrape target.
+</Tip>
+
+## Visualizing in Grafana
+
+The CrowdSec community maintains an official Grafana dashboard. Import it via the Grafana dashboard import UI using dashboard ID **14584** from Grafana.com, or download it from the [CrowdSec GitHub repository](https://github.com/crowdsecurity/crowdsec).
+
+**Useful PromQL queries**
+
+```promql
+# Total parsing failures in the last 5 minutes
+increase(cs_parser_hits_ko_total[5m])
+
+# Current ban count from the community blocklist
+cs_active_decisions{origin="CAPI", action="ban"}
+
+# Bouncer decision pull rate (non-empty responses per minute)
+rate(cs_lapi_decisions_ok_total[1m])
+
+# LAPI p99 response time
+histogram_quantile(0.99, rate(cs_lapi_request_duration_seconds_bucket[5m]))
+```
+
+## Adjusting metrics granularity
+
+Use the `level` field to trade detail for cardinality:
+
+| Level | What is included |
+|---|---|
+| `none` | No metrics registered; endpoint returns nothing useful |
+| `aggregated` | Global parser hit counts, bucket totals, LAPI route hits; no per-machine or per-bouncer breakdown |
+| `full` | Everything: per-parser, per-bouncer, per-machine, per-scenario detail (default) |
+
+```yaml
+prometheus:
+  enabled: true
+  level: aggregated   # reduce cardinality on busy nodes
+  listen_addr: 127.0.0.1
+  listen_port: 6060
+```

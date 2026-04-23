@@ -1,0 +1,93 @@
+---
+title: "CrowdSec Local API: agents, bouncers, and decisions"
+description: "The CrowdSec Local API (LAPI) is the central HTTP service that connects agents, bouncers, and the CrowdSec Central API on a single node."
+---
+
+The CrowdSec Local API (LAPI) runs on every CrowdSec installation and acts as the hub between detection and remediation. Agents (watchers) push alerts to LAPI after detecting suspicious behaviour, LAPI applies your decision profiles, and bouncers (remediation components) query LAPI to enforce those decisions at the network edge. LAPI also bridges to the Central API (CAPI) to exchange crowdsourced threat intelligence with the global CrowdSec network.
+
+## Base URL
+
+By default LAPI listens on:
+
+```
+http://127.0.0.1:8080
+```
+
+You can change the address in `config.yaml` under `api.server.listen_uri`. LAPI also supports a Unix socket via `api.server.listen_socket`.
+
+All API paths are prefixed with `/v1`.
+
+## API types
+
+<CardGroup cols={2}>
+  <Card title="Local API (LAPI)" icon="server">
+    Runs on your host. Agents write alerts to it; bouncers read decisions from it. Covered in this section.
+  </Card>
+  <Card title="Central API (CAPI)" icon="globe">
+    The global CrowdSec network. LAPI pushes signals to CAPI and pulls the community blocklist from it. See the [Central API overview](/api/capi-overview).
+  </Card>
+</CardGroup>
+
+## Client types
+
+| Client type | Also called | Auth method | Typical operations |
+|---|---|---|---|
+| Agents / CrowdSec engine | Watchers, machines | JWT token | Push alerts, register, heartbeat |
+| Bouncers | Remediation components | API key (`X-Api-Key`) | Read decisions, stream decisions |
+
+See [Authentication](/api/authentication) for how each client obtains credentials.
+
+## Endpoints
+
+### Watchers (agents)
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/v1/watchers` | Register a new machine |
+| `POST` | `/v1/watchers/login` | Authenticate and receive a JWT |
+| `DELETE` | `/v1/watchers/self` | Unregister the calling machine |
+| `GET` | `/v1/heartbeat` | Send a heartbeat to keep machine active |
+| `POST` | `/v1/alerts` | Push one or more alerts |
+| `GET` | `/v1/alerts` | Search/list alerts |
+| `DELETE` | `/v1/alerts` | Bulk-delete alerts matching filters |
+| `GET` | `/v1/alerts/{alert_id}` | Fetch a single alert by ID |
+| `DELETE` | `/v1/alerts/{alert_id}` | Delete a single alert by ID |
+
+### Remediation components (bouncers)
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/v1/decisions` | Query active decisions by IP, range, scope, or type |
+| `GET` | `/v1/decisions/stream` | Long-poll stream of new and expired decisions |
+| `DELETE` | `/v1/decisions` | Bulk-expire decisions matching filters (JWT only) |
+| `DELETE` | `/v1/decisions/{decision_id}` | Expire a single decision by ID (JWT only) |
+
+## Data flow
+
+```
+[CrowdSec agent] --POST /v1/alerts--> [LAPI] --signals--> [CAPI]
+                                         |
+                           [bouncer] <--GET /v1/decisions/stream--
+```
+
+1. The CrowdSec agent parses logs, detects attacks, and pushes alerts via `POST /v1/alerts`.
+2. LAPI evaluates profiles and creates decisions (ban, captcha, etc.).
+3. Bouncers poll `GET /v1/decisions/stream` to receive those decisions and act on them.
+4. If CAPI is configured, LAPI also forwards signals upstream and pulls the community blocklist.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Authentication" icon="key" href="/api/authentication">
+    How agents and bouncers authenticate with LAPI.
+  </Card>
+  <Card title="Alerts" icon="bell" href="/api/alerts">
+    Reference for the alerts endpoints.
+  </Card>
+  <Card title="Decisions" icon="shield" href="/api/decisions">
+    Reference for the decisions and stream endpoints.
+  </Card>
+  <Card title="Machines" icon="computer" href="/api/machines">
+    Register and manage CrowdSec agents.
+  </Card>
+</CardGroup>

@@ -1,0 +1,409 @@
+---
+title: "Fix CrowdSec: logs not parsing, alerts, and bouncers"
+description: "Fix common CrowdSec problems: logs not parsing, missing alerts, bouncers not enforcing decisions, CAPI connectivity errors, and high CPU or memory usage."
+---
+
+Most CrowdSec issues fall into a small number of categories: logs not being read or parsed, scenarios not triggering, bouncers not acting on decisions, or connectivity failures with the Central or Local API. This guide walks through each category with diagnostic commands and concrete fixes.
+
+## Log file locations
+
+Before diving into specific issues, know where to look for log output:
+
+| Log file | Description |
+|---|---|
+| `/var/log/crowdsec/crowdsec.log` | Main security engine (acquisition, parsing, scenarios) |
+| `/var/log/crowdsec/crowdsec-api.log` | Local API (LAPI) request log |
+| `/var/log/crowdsec/crowdsec_agent.log` | Agent registration and CAPI sync |
+
+<Tip>
+Increase log verbosity temporarily with `sudo systemctl edit crowdsec` and add `--debug` to the `ExecStart` arguments, or pass `--debug` to `cscli` for a single command.
+</Tip>
+
+## Diagnostic tools
+
+Two `cscli` commands are especially useful during troubleshooting:
+
+### cscli explain — Test a log line against parsers
+
+`cscli explain` runs a log line or file through the full parser pipeline offline and shows the result of each stage.
+
+```bash
+# Test a single log line
+cscli explain \
+  --log "Sep 19 18:33:22 host sshd[1234]: Failed password for root from 1.2.3.4 port 22 ssh2" \
+  --type syslog
+
+# Test a log file
+cscli explain --file /var/log/nginx/access.log --type nginx
+
+# Show verbose per-parser output
+cscli explain --file ./test.log --type nginx --verbose
+
+# Show only lines that failed to parse
+cscli explain --file ./test.log --type nginx --failures
+
+# Pipe from stdin
+tail -n 20 /var/log/auth.log | cscli explain --type syslog -f -
+```
+
+The `--type` flag must match the acquisition type configured in `acquis.yaml` (e.g. `nginx`, `syslog`, `apache2`).
+
+### cscli support dump — Collect a support bundle
+
+Before escalating an issue, collect a full diagnostic bundle:
+
+```bash
+# Saves to /tmp/crowdsec-support.zip by default
+cscli support dump
+
+# Custom output path
+cscli support dump -f /tmp/my-support-$(date +%Y%m%d).zip
+
+# Skip 30-second CPU profiling for faster collection
+cscli support dump --fast
+```
+
+The bundle contains: CrowdSec version, OS info, enabled feature flags, recent logs, hub item list, bouncers and machines list, CAPI/LAPI connectivity status, config files with credentials redacted, Prometheus metrics snapshot, and crash traces.
+
+---
+
+## Common issues
+
+<AccordionGroup>
+
+<Accordion title="Log sources not being parsed">
+
+**Symptoms:** `cscli metrics show acquisition` shows `Lines read = 0` for a source, or `Lines parsed = 0` despite lines being read.
+
+**Step 1: Verify acquisition configuration**
+
+Check `/etc/crowdsec/acquis.yaml` (and any files in `/etc/crowdsec/acquis.d/`):
+
+```yaml
+# Example: tailing an nginx access log
+filenames:
+  - /var/log/nginx/access.log
+labels:
+  type: nginx
+---
+# Example: reading from journald
+source: journalctl
+journalctl_filter:
+  - "_SYSTEMD_UNIT=sshd.service"
+labels:
+  type: syslog
+```
+
+Common mistakes:
+- Wrong file path (check with `ls -la /var/log/nginx/access.log`)
+- Wrong `type` label (must match an installed parser collection)
+- File permissions: CrowdSec runs as root by default, but check if SELinux or AppArmor is blocking file access
+
+After editing `acquis.yaml`, restart CrowdSec:
+```bash
+sudo systemctl restart crowdsec
+```
+
+**Step 2: Test the log line with cscli explain**
+
+```bash
+cscli explain \
+  --log '1.2.3.4 - - [01/Jan/2024:00:00:00 +0000] "GET /admin HTTP/1.1" 404 512' \
+  --type nginx
+```
+
+If the output shows all parsers failing (`KO`), the required collection is not installed.
+
+**Step 3: Install the missing collection**
+
+```bash
+# Update the hub index first
+cscli hub update
+
+# Install the collection for your log type
+cscli collections install crowdsecurity/nginx
+cscli collections install crowdsecurity/sshd
+
+sudo systemctl restart crowdsec
+```
+
+**Step 4: Check logs for errors**
+
+```bash
+sudo journalctl -u crowdsec -n 100 --no-pager | grep -i "error\|warn"
+```
+
+</Accordion>
+
+<Accordion title="No alerts being raised">
+
+**Symptoms:** Logs are being parsed, but `cscli alerts list` shows no recent alerts even under obvious attack conditions.
+
+**Step 1: Confirm scenarios are installed**
+
+```bash
+cscli scenarios list
+```
+
+If the list is empty, install scenarios via a collection:
+
+```bash
+cscli hub update
+cscli collections install crowdsecurity/sshd
+sudo systemctl restart crowdsec
+```
+
+**Step 2: Check simulation mode**
+
+If simulation mode is active for a scenario, it will generate decisions marked `(simul)` but not real decisions visible to bouncers:
+
+```bash
+cscli simulation status
+```
+
+To disable simulation for a scenario:
+
+```bash
+cscli simulation disable crowdsecurity/ssh-bf
+```
+
+**Step 3: Verify events are reaching buckets**
+
+Use `cscli metrics show scenarios` and look at the `Pour` column. If events are being parsed but buckets show zero pours, the scenario's filter expression may not match the parsed event fields.
+
+Run `cscli explain` with `--verbose` to see the full enriched event and check whether the scenario filter would match:
+
+```bash
+cscli explain --file ./sample.log --type nginx --verbose 2>&1 | grep -A5 "Pour"
+```
+
+**Step 4: Check bucket thresholds**
+
+A scenario may need many events within a time window before it overflows. For SSH brute force (`crowdsecurity/ssh-bf`), the default threshold is typically 6 failures. Use `cscli explain` with multiple log lines to simulate enough events.
+
+</Accordion>
+
+<Accordion title="Bouncer not receiving decisions">
+
+**Symptoms:** Bans appear in `cscli decisions list` but the bouncer is not enforcing them. Traffic from banned IPs still gets through.
+
+**Step 1: Verify the bouncer is registered**
+
+```bash
+cscli bouncers list
+```
+
+If your bouncer is missing, add it:
+
+```bash
+cscli bouncers add my-bouncer-name
+```
+
+Copy the printed API key into the bouncer's configuration file (location varies by bouncer, e.g. `/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml`).
+
+**Step 2: Check API key validity**
+
+Look in the bouncer's own log file for authentication errors:
+
+```bash
+# For firewall bouncer
+sudo journalctl -u crowdsec-firewall-bouncer -n 50 --no-pager
+
+# Common error: "401 Unauthorized" or "API key not found"
+```
+
+If the key was lost or regenerated, delete and re-add the bouncer:
+
+```bash
+cscli bouncers delete my-bouncer-name
+cscli bouncers add my-bouncer-name
+# Update the API key in the bouncer config, then restart it
+sudo systemctl restart crowdsec-firewall-bouncer
+```
+
+**Step 3: Verify LAPI connectivity from the bouncer host**
+
+If the bouncer runs on a different machine:
+
+```bash
+curl -s http://<lapi-host>:8080/v1/decisions \
+  -H "X-Api-Key: <bouncer-api-key>" | head -c 200
+```
+
+A `200 OK` with `null` or a JSON array means the connection is working.
+
+**Step 4: Check bouncer pull metrics**
+
+```bash
+cscli metrics show lapi-decisions
+```
+
+Look for your bouncer's name in the table. The `non-nil` column shows pulls that returned decisions. A value of 0 means the bouncer never received a non-empty response.
+
+**Step 5: Confirm LAPI listen address**
+
+Check `/etc/crowdsec/config.yaml`:
+
+```yaml
+api:
+  server:
+    listen_uri: 0.0.0.0:8080   # must be reachable from the bouncer host
+```
+
+</Accordion>
+
+<Accordion title="CrowdSec not connecting to CAPI">
+
+**Symptoms:** `cscli capi status` returns an error. The community blocklist is not being downloaded.
+
+**Step 1: Check CAPI credentials**
+
+```bash
+cat /etc/crowdsec/online_api_credentials.yaml
+```
+
+The file should contain a `login`, `password`, and `url` pointing to `https://api.crowdsec.net`. If it is empty or missing, register:
+
+```bash
+cscli capi register
+sudo systemctl restart crowdsec
+```
+
+**Step 2: Test CAPI connectivity**
+
+```bash
+cscli capi status
+```
+
+If this returns a network error, check:
+- DNS resolution: `nslookup api.crowdsec.net`
+- Outbound HTTPS (port 443): `curl -v https://api.crowdsec.net/v3/decisions/stream?startup=true -H "X-Api-Key: $(grep password /etc/crowdsec/online_api_credentials.yaml | awk '{print $2}')" 2>&1 | head -20`
+- Proxy or firewall blocking outbound 443
+
+**Step 3: Check logs for CAPI errors**
+
+```bash
+sudo grep -i "capi\|central api" /var/log/crowdsec/crowdsec.log | tail -30
+```
+
+Common errors:
+- `connection refused` — firewall blocking outbound 443
+- `certificate verify failed` — system CA bundle outdated, or a MITM proxy is intercepting TLS
+- `credentials not found` — missing or corrupt `online_api_credentials.yaml`
+
+</Accordion>
+
+<Accordion title="High CPU or memory usage">
+
+**Symptoms:** CrowdSec process consuming excessive CPU or memory, especially after startup or during log bursts.
+
+**Step 1: Identify the bottleneck with metrics**
+
+```bash
+cscli metrics show acquisition parsers scenarios
+```
+
+- High `Lines read` with high `Lines unparsed` → many log lines are being read but not matched; consider reducing acquisition scope
+- Very large number of active buckets (`cs_buckets` gauge) → many concurrent tracked sessions; check if the source is generating excessive unique events
+
+**Step 2: Review acquisition sources**
+
+Check `/etc/crowdsec/acquis.yaml` for overly broad patterns:
+
+```yaml
+# Avoid glob patterns that match too many files
+filenames:
+  - /var/log/*.log    # may include large, irrelevant logs
+```
+
+Narrow it to only the log files that are relevant to your installed scenarios.
+
+**Step 3: Reduce parser goroutines**
+
+In `/etc/crowdsec/config.yaml`, the `crowdsec` section controls parser parallelism:
+
+```yaml
+crowdsec:
+  parser_routines: 1   # default; increase if parsing is the bottleneck
+  buckets_routines: 1  # increase if bucket evaluation is slow
+  output_routines: 1   # controls alert output concurrency
+```
+
+<Warning>
+Increasing goroutine counts also increases memory usage. Start with the defaults and only tune if profiling data (from `cscli support dump`) confirms the bottleneck.
+</Warning>
+
+**Step 4: Collect pprof data**
+
+The support dump includes goroutine and heap profiles that can identify stuck goroutines or memory leaks:
+
+```bash
+cscli support dump -f /tmp/support.zip
+```
+
+Share this zip with the CrowdSec team or community when reporting the issue.
+
+</Accordion>
+
+</AccordionGroup>
+
+## Quick diagnostic checklist
+
+<Steps>
+  <Step title="Check service status">
+    ```bash
+    sudo systemctl status crowdsec
+    sudo journalctl -u crowdsec -n 50 --no-pager
+    ```
+  </Step>
+
+  <Step title="Check metrics">
+    ```bash
+    cscli metrics show engine
+    ```
+    Confirm lines are being read and parsed for each source.
+  </Step>
+
+  <Step title="Verify hub items are up to date">
+    ```bash
+    cscli hub update
+    cscli hub list
+    ```
+    Items marked with an upgrade available should be updated: `cscli hub upgrade`.
+  </Step>
+
+  <Step title="Test a log line">
+    ```bash
+    cscli explain --log "<paste a real log line here>" --type <your-log-type>
+    ```
+  </Step>
+
+  <Step title="Collect a support bundle">
+    ```bash
+    cscli support dump -f /tmp/crowdsec-support.zip
+    ```
+    Attach this to any GitHub issue or forum post.
+  </Step>
+</Steps>
+
+## Getting help
+
+<CardGroup cols={2}>
+
+<Card title="GitHub Issues" icon="github" href="https://github.com/crowdsecurity/crowdsec/issues">
+  Report bugs or unexpected behavior with a support dump attached.
+</Card>
+
+<Card title="CrowdSec Discourse" icon="comments" href="https://discourse.crowdsec.net">
+  Community forum for configuration questions and how-to discussions.
+</Card>
+
+<Card title="CrowdSec Discord" icon="discord" href="https://discord.gg/crowdsec">
+  Real-time help from the community and CrowdSec team.
+</Card>
+
+<Card title="Documentation" icon="book" href="https://doc.crowdsec.net">
+  Official documentation including advanced configuration guides.
+</Card>
+
+</CardGroup>

@@ -1,0 +1,249 @@
+---
+title: "Install CrowdSec on Linux with apt, yum, or source"
+description: "Install CrowdSec on Debian, Ubuntu, RHEL, CentOS, or Fedora, or build from source. Covers package repos, systemd setup, and post-install verification."
+---
+
+CrowdSec provides official packages for all major Linux distributions. The recommended approach is to use the official repository for your distribution, which gives you automatic updates and proper systemd integration. You can also build from source if you need a custom configuration or are running on an unsupported platform.
+
+<Tabs>
+  <Tab title="Debian / Ubuntu">
+    <Steps>
+      <Step title="Add the CrowdSec repository">
+        Install the repository signing key and add the apt source:
+
+        ```bash
+        curl -s https://install.crowdsec.net | sudo sh
+        ```
+
+        This script adds the CrowdSec apt repository and imports the GPG key. Alternatively, add the repository manually:
+
+        ```bash
+        curl -fsSL https://packagecloud.io/crowdsec/crowdsec/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/crowdsec-archive-keyring.gpg
+        echo "deb [signed-by=/usr/share/keyrings/crowdsec-archive-keyring.gpg] https://packagecloud.io/crowdsec/crowdsec/debian $(lsb_release -cs) main" \
+          | sudo tee /etc/apt/sources.list.d/crowdsec.list
+        ```
+      </Step>
+
+      <Step title="Install the package">
+        Update the package index and install CrowdSec:
+
+        ```bash
+        sudo apt-get update
+        sudo apt-get install -y crowdsec
+        ```
+
+        The post-install script automatically runs `cscli setup unattended` to detect running services (such as Nginx, SSH, and MySQL) and configure log acquisition accordingly.
+      </Step>
+
+      <Step title="Enable and start the service">
+        The package enables the systemd service automatically. To manage it manually:
+
+        ```bash
+        sudo systemctl enable crowdsec
+        sudo systemctl start crowdsec
+        sudo systemctl status crowdsec
+        ```
+      </Step>
+    </Steps>
+  </Tab>
+
+  <Tab title="RHEL / CentOS / Fedora">
+    <Steps>
+      <Step title="Add the CrowdSec repository">
+        Install the repository configuration:
+
+        ```bash
+        curl -s https://install.crowdsec.net | sudo sh
+        ```
+
+        Or add the repository manually for RHEL-based systems:
+
+        ```bash
+        sudo rpm --import https://packagecloud.io/crowdsec/crowdsec/gpgkey
+        sudo tee /etc/yum.repos.d/crowdsec.repo <<EOF
+        [crowdsec]
+        name=CrowdSec
+        baseurl=https://packagecloud.io/crowdsec/crowdsec/el/\$releasever/\$basearch
+        repo_gpgcheck=1
+        gpgcheck=0
+        enabled=1
+        gpgkey=https://packagecloud.io/crowdsec/crowdsec/gpgkey
+        sslverify=1
+        sslcacert=/etc/pki/tls/certs/ca-bundle.crt
+        metadata_expire=300
+        EOF
+        ```
+      </Step>
+
+      <Step title="Install the package">
+        Install using `dnf` (Fedora / RHEL 8+) or `yum` (CentOS 7 / RHEL 7):
+
+        ```bash
+        # Fedora / RHEL 8+
+        sudo dnf install -y crowdsec
+
+        # CentOS 7 / RHEL 7
+        sudo yum install -y crowdsec
+        ```
+
+        <Note>
+          On RHEL and CentOS, the `re2` library (`re2-devel`) may be required as a build dependency if you are compiling from source. The RPM package includes a statically linked binary so no extra dependencies are needed for the package install.
+        </Note>
+      </Step>
+
+      <Step title="Enable and start the service">
+        ```bash
+        sudo systemctl enable crowdsec
+        sudo systemctl start crowdsec
+        sudo systemctl status crowdsec
+        ```
+      </Step>
+    </Steps>
+  </Tab>
+
+  <Tab title="From source">
+    <Steps>
+      <Step title="Install prerequisites">
+        You need Go 1.21+, `make`, `pkg-config`, and the `re2` C++ library:
+
+        ```bash
+        # Debian / Ubuntu
+        sudo apt-get install -y golang make pkg-config libre2-dev
+
+        # Fedora / RHEL
+        sudo dnf install -y golang make pkgconfig re2-devel
+
+        # Alpine
+        sudo apk add go make pkgconfig re2-dev
+        ```
+
+        To build without the C++ `re2` library (uses a slower WebAssembly fallback), set `BUILD_RE2_WASM=1` when running `make`.
+      </Step>
+
+      <Step title="Clone the repository">
+        ```bash
+        git clone https://github.com/crowdsecurity/crowdsec.git
+        cd crowdsec
+        ```
+      </Step>
+
+      <Step title="Build the binaries">
+        ```bash
+        make build
+        ```
+
+        This produces `crowdsec` and `cscli` binaries in the `cmd/crowdsec/` and `cmd/crowdsec-cli/` directories respectively. For a static build, run `make BUILD_STATIC=1 build`.
+      </Step>
+
+      <Step title="Install configuration files">
+        Run the installation wizard to place binaries and configuration files in the correct locations:
+
+        ```bash
+        sudo ./wizard.sh --install
+        ```
+
+        Configuration is placed in `/etc/crowdsec/` and data in `/var/lib/crowdsec/data/` by default, as defined in the main config file:
+
+        ```yaml
+        config_paths:
+          config_dir: /etc/crowdsec/
+          data_dir: /var/lib/crowdsec/data/
+          hub_dir: /etc/crowdsec/hub/
+        ```
+      </Step>
+
+      <Step title="Install the systemd unit">
+        Copy the service file and enable the unit:
+
+        ```bash
+        sudo cp config/crowdsec.service /etc/systemd/system/crowdsec.service
+        sudo systemctl daemon-reload
+        sudo systemctl enable crowdsec
+        sudo systemctl start crowdsec
+        ```
+
+        The service file uses `Type=notify` and validates the config before starting:
+
+        ```ini
+        [Service]
+        Type=notify
+        ExecStartPre=/usr/local/bin/crowdsec -c /etc/crowdsec/config.yaml -t -error
+        ExecStart=/usr/local/bin/crowdsec -c /etc/crowdsec/config.yaml
+        Restart=always
+        RestartSec=60
+        ```
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+## Manage the service
+
+Use standard `systemctl` commands to control CrowdSec:
+
+```bash
+# Start, stop, and restart
+sudo systemctl start crowdsec
+sudo systemctl stop crowdsec
+sudo systemctl restart crowdsec
+
+# Reload configuration without restarting
+sudo systemctl reload crowdsec
+
+# View service status
+sudo systemctl status crowdsec
+
+# Follow live logs
+sudo journalctl -u crowdsec -f
+```
+
+## Verify the installation
+
+After the service starts, confirm it is running correctly with `cscli`:
+
+```bash
+# Check the version of the engine and cscli
+cscli version
+
+# List installed hub items (parsers, scenarios, collections)
+cscli hub list
+
+# View active decisions (blocked IPs)
+cscli decisions list
+
+# View recent alerts
+cscli alerts list
+```
+
+<Tip>
+  If `cscli hub list` shows no items, run `cscli hub update && cscli hub upgrade` to pull the latest content from the CrowdSec Hub.
+</Tip>
+
+## Default file locations
+
+| Path | Purpose |
+|------|---------|
+| `/etc/crowdsec/config.yaml` | Main configuration file |
+| `/etc/crowdsec/acquis.yaml` | Log acquisition configuration |
+| `/etc/crowdsec/acquis.d/` | Additional acquisition configs (drop-in directory) |
+| `/etc/crowdsec/hub/` | Hub content (parsers, scenarios, collections) |
+| `/etc/crowdsec/profiles.yaml` | Remediation profiles |
+| `/var/lib/crowdsec/data/crowdsec.db` | SQLite database |
+| `/var/log/crowdsec.log` | Application log |
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration overview" icon="sliders" href="/configuration/overview">
+    Understand how to configure the security engine, API server, and database.
+  </Card>
+  <Card title="Log acquisition" icon="file-lines" href="/configuration/acquisition">
+    Configure which log files and sources CrowdSec monitors.
+  </Card>
+  <Card title="Install a bouncer" icon="shield" href="/remediation/bouncers">
+    Deploy a remediation component to actively block threats at the firewall or application layer.
+  </Card>
+  <Card title="Hub" icon="boxes-stacked" href="/detection/hub">
+    Browse community-contributed parsers, scenarios, and collections.
+  </Card>
+</CardGroup>

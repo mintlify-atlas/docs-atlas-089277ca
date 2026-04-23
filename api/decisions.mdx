@@ -1,0 +1,289 @@
+---
+title: "Decisions API: query and stream remediation actions"
+description: "Query, stream, and manage CrowdSec decisions — the bans, captchas, and custom remediation actions that bouncers enforce at the network edge."
+---
+
+Decisions are the enforcement actions that LAPI creates when an alert matches a profile. A decision has a scope (IP, range, username, etc.), a value (the specific target), a type (ban, captcha, or custom), and an expiry duration. Bouncers read decisions via the streaming endpoint and apply them in real time. Operators can also create manual decisions via `cscli` and the LAPI endpoints below.
+
+Bouncers authenticate with an `X-Api-Key` header. Write operations (DELETE) require a JWT token. See [Authentication](/api/authentication) for details.
+
+---
+
+## GET /v1/decisions
+
+Query active decisions. Useful when you want to check whether a specific IP is currently banned, or to build a one-time snapshot for an external tool.
+
+```bash
+curl http://127.0.0.1:8080/v1/decisions \
+  -H "X-Api-Key: <bouncer-key>"
+```
+
+### Query parameters
+
+<ParamField query="ip" type="string">
+  Check decisions for a specific IP address. Shorthand for `scope=Ip&value=<ip>`.
+
+  ```bash
+  curl "http://127.0.0.1:8080/v1/decisions?ip=1.2.3.4" \
+    -H "X-Api-Key: <bouncer-key>"
+  ```
+</ParamField>
+
+<ParamField query="range" type="string">
+  Check decisions for a CIDR range. Shorthand for `scope=Range&value=<cidr>`.
+</ParamField>
+
+<ParamField query="scope" type="string">
+  Scope of the decision: `Ip`, `Range`, `Username`, `Session`, etc.
+</ParamField>
+
+<ParamField query="value" type="string">
+  Target value matching the scope.
+</ParamField>
+
+<ParamField query="type" type="string">
+  Decision type filter: `ban`, `captcha`, or a custom type.
+</ParamField>
+
+<ParamField query="contains" type="boolean">
+  When `true`, search for a decision whose value contains the query value (e.g. the range `10.0.0.0/8` contains IP `10.1.2.3`). When `false` (default), search for an exact match.
+</ParamField>
+
+<ParamField query="origins" type="string">
+  Comma-separated list of origins to include. Examples: `crowdsec`, `cscli`, `CAPI`, `lists`.
+</ParamField>
+
+<ParamField query="scenarios_containing" type="string">
+  Comma-separated keywords. Only decisions whose scenario name contains at least one of these keywords are returned.
+</ParamField>
+
+<ParamField query="scenarios_not_containing" type="string">
+  Comma-separated keywords. Decisions whose scenario name contains any of these keywords are excluded.
+</ParamField>
+
+**Response `200 OK`:** array of decision objects, or `null` when no decisions match.
+
+```json
+[
+  {
+    "id": 7,
+    "duration": "3h45m00s",
+    "scenario": "crowdsecurity/ssh-bf",
+    "scope": "Ip",
+    "type": "ban",
+    "value": "1.2.3.4",
+    "origin": "crowdsec",
+    "uuid": "550e8400-e29b-41d4-a716-446655440000"
+  }
+]
+```
+
+<Note>
+  LAPI updates the bouncer's `last_pull` timestamp after each successful `GET /v1/decisions` call (at most once per minute). This timestamp is used by the streaming endpoint to compute deltas.
+</Note>
+
+---
+
+## GET /v1/decisions/stream
+
+The primary endpoint for bouncers. Returns a JSON object with two arrays: `new` (decisions that became active since the last pull) and `deleted` (decisions that expired or were removed since the last pull).
+
+This is the endpoint your bouncer should poll on a short interval (e.g. every 2–10 seconds) to keep enforcement up to date.
+
+### Startup vs. incremental mode
+
+<AccordionGroup>
+  <Accordion title="Startup mode (startup=true)">
+    Use `startup=true` when your bouncer starts for the first time or after a restart. LAPI returns **all currently active decisions** in `new` and **all recently expired decisions** in `deleted`. This lets the bouncer build a complete enforcement table from scratch.
+
+    ```bash
+    curl "http://127.0.0.1:8080/v1/decisions/stream?startup=true" \
+      -H "X-Api-Key: <bouncer-key>"
+    ```
+
+    ```json
+    {
+      "new": [
+        {
+          "id": 7,
+          "duration": "3h45m00s",
+          "scenario": "crowdsecurity/ssh-bf",
+          "scope": "Ip",
+          "type": "ban",
+          "value": "1.2.3.4",
+          "origin": "crowdsec"
+        }
+      ],
+      "deleted": []
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Incremental mode (default)">
+    Subsequent calls without `startup=true` return only the **delta since the last pull**. LAPI uses the bouncer's stored `last_pull` timestamp to compute which decisions were added or expired in the interval.
+
+    ```bash
+    curl http://127.0.0.1:8080/v1/decisions/stream \
+      -H "X-Api-Key: <bouncer-key>"
+    ```
+
+    ```json
+    {
+      "new": [
+        {
+          "id": 12,
+          "duration": "23h59m58s",
+          "scenario": "crowdsecurity/http-bf",
+          "scope": "Ip",
+          "type": "ban",
+          "value": "5.6.7.8",
+          "origin": "crowdsec"
+        }
+      ],
+      "deleted": [
+        {
+          "id": 7,
+          "duration": "0s",
+          "scenario": "crowdsecurity/ssh-bf",
+          "scope": "Ip",
+          "type": "ban",
+          "value": "1.2.3.4",
+          "origin": "crowdsec"
+        }
+      ]
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Query parameters
+
+<ParamField query="startup" type="boolean">
+  When `true`, return the full current decision set rather than a delta. Use this on bouncer startup or restart.
+</ParamField>
+
+<ParamField query="scopes" type="string">
+  Comma-separated scopes to include. Defaults to `ip,range`. Set to `Ip,Range,Username` to also receive username-scoped decisions.
+</ParamField>
+
+<ParamField query="origins" type="string">
+  Comma-separated list of origins to filter by.
+</ParamField>
+
+<ParamField query="scenarios_containing" type="string">
+  Include only decisions from scenarios whose name contains these keywords.
+</ParamField>
+
+<ParamField query="scenarios_not_containing" type="string">
+  Exclude decisions from scenarios whose name contains these keywords.
+</ParamField>
+
+### Implementation notes
+
+- LAPI updates the bouncer's `last_pull` timestamp **only after a successful full response**. If the connection drops mid-stream, the next call will re-send the same delta.
+- When the feature flag `chunked_decisions_stream` is enabled, LAPI uses chunked transfer encoding to stream large decision sets without buffering everything in memory. This is transparent to clients.
+- The default scope filter is `ip,range`. If your bouncer handles usernames or sessions, set `scopes=Ip,Range,Username` explicitly.
+
+---
+
+## DELETE /v1/decisions
+
+Bulk-expire decisions matching the provided filters. Requires a JWT token (watcher auth). Expired decisions appear in the `deleted` array of the next stream response.
+
+```bash
+curl -X DELETE "http://127.0.0.1:8080/v1/decisions?ip=1.2.3.4" \
+  -H "Authorization: Bearer <jwt>"
+```
+
+### Query parameters
+
+<ParamField query="ip" type="string">
+  Expire all decisions for this IP.
+</ParamField>
+
+<ParamField query="range" type="string">
+  Expire all decisions for this CIDR range.
+</ParamField>
+
+<ParamField query="scope" type="string">
+  Scope of decisions to expire.
+</ParamField>
+
+<ParamField query="value" type="string">
+  Target value to expire decisions for.
+</ParamField>
+
+<ParamField query="type" type="string">
+  Decision type to expire: `ban`, `captcha`, etc.
+</ParamField>
+
+<ParamField query="scenario" type="string">
+  Expire decisions from a specific scenario.
+</ParamField>
+
+**Response `200 OK`:**
+
+```json
+{ "nb_deleted": "3" }
+```
+
+---
+
+## DELETE /v1/decisions/{decision_id}
+
+Expire a single decision by its numeric ID. Requires a JWT token.
+
+```bash
+curl -X DELETE http://127.0.0.1:8080/v1/decisions/7 \
+  -H "Authorization: Bearer <jwt>"
+```
+
+**Response `200 OK`:**
+
+```json
+{ "nb_deleted": "1" }
+```
+
+<Note>
+  Deleting a decision does not remove it from the database immediately — it expires it. The decision continues to appear in the stream's `deleted` array until the bouncer pulls the update.
+</Note>
+
+---
+
+## Decision object reference
+
+<ResponseField name="id" type="integer">
+  Unique numeric ID (read-only, set by LAPI on creation).
+</ResponseField>
+
+<ResponseField name="uuid" type="string">
+  UUID (read-only).
+</ResponseField>
+
+<ResponseField name="duration" type="string" required>
+  Time remaining on the decision in Go duration format, e.g. `3h45m00s`. On a newly created decision this equals the full configured duration.
+</ResponseField>
+
+<ResponseField name="scenario" type="string" required>
+  The scenario name that created the decision, e.g. `crowdsecurity/ssh-bf`.
+</ResponseField>
+
+<ResponseField name="scope" type="string" required>
+  The scope the decision applies to: `Ip`, `Range`, `Username`, `Session`, etc.
+</ResponseField>
+
+<ResponseField name="value" type="string" required>
+  The target value within the scope, e.g. `1.2.3.4` or `10.0.0.0/24`.
+</ResponseField>
+
+<ResponseField name="type" type="string" required>
+  The remediation type: `ban`, `captcha`, or any custom string defined in your profiles.
+</ResponseField>
+
+<ResponseField name="origin" type="string" required>
+  How the decision was created: `crowdsec` (agent), `cscli` (manual), `CAPI` (community blocklist), or `lists` (subscribed blocklist).
+</ResponseField>
+
+<ResponseField name="simulated" type="boolean">
+  `true` if the decision came from a scenario running in simulation mode (read-only).
+</ResponseField>

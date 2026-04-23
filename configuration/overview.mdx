@@ -1,0 +1,480 @@
+---
+title: "CrowdSec config.yaml: complete configuration reference"
+description: "Reference for config.yaml, CrowdSec's main config file. Covers common, config_paths, crowdsec_service, db_config, API client and server, and Prometheus."
+---
+
+CrowdSec is configured through a single primary file, `/etc/crowdsec/config.yaml`. This file controls every aspect of the security engine's behavior: where it logs, which database it uses, how the local API is exposed, and where supporting files such as parsers, scenarios, and acquisition rules are stored. Configuration values can reference environment variables using the `${VAR}` syntax, and any section can be overridden by placing a `.local` variant alongside the main file (for example, `config.yaml.local`).
+
+The sections below document each top-level key in the order they appear in the default configuration.
+
+## File location
+
+| Platform | Default path |
+|----------|-------------|
+| Linux (package install) | `/etc/crowdsec/config.yaml` |
+| Linux (manual install) | `/etc/crowdsec/config.yaml` |
+| Windows | `C:\ProgramData\CrowdSec\config\config.yaml` |
+
+<Note>
+Use `cscli config show` to display the parsed, effective configuration, including values resolved from environment variables.
+</Note>
+
+## Full default configuration
+
+```yaml
+common:
+  daemonize: true
+  log_media: file
+  log_level: info
+  log_dir: /var/log/
+  log_max_size: 20
+  compress_logs: true
+  log_max_files: 10
+config_paths:
+  config_dir: /etc/crowdsec/
+  data_dir: /var/lib/crowdsec/data/
+  simulation_path: /etc/crowdsec/simulation.yaml
+  hub_dir: /etc/crowdsec/hub/
+  index_path: /etc/crowdsec/hub/.index.json
+  notification_dir: /etc/crowdsec/notifications/
+  plugin_dir: /usr/local/lib/crowdsec/plugins/
+crowdsec_service:
+  acquisition_path: /etc/crowdsec/acquis.yaml
+  acquisition_dir: /etc/crowdsec/acquis.d
+  parser_routines: 1
+cscli:
+  output: human
+  color: auto
+db_config:
+  log_level: info
+  type: sqlite
+  db_path: /var/lib/crowdsec/data/crowdsec.db
+  flush:
+    max_items: 5000
+    max_age: 7d
+plugin_config:
+  user: nobody
+  group: nogroup
+api:
+  client:
+    insecure_skip_verify: false
+    credentials_path: /etc/crowdsec/local_api_credentials.yaml
+  server:
+    log_level: info
+    listen_uri: 127.0.0.1:8080
+    profiles_path: /etc/crowdsec/profiles.yaml
+    console_path: /etc/crowdsec/console.yaml
+    online_client:
+      credentials_path: /etc/crowdsec/online_api_credentials.yaml
+    trusted_ips:
+      - 127.0.0.1
+      - ::1
+prometheus:
+  enabled: true
+  level: full
+  listen_addr: 127.0.0.1
+  listen_port: 6060
+```
+
+---
+
+## `common`
+
+The `common` section configures global daemon behavior and log output.
+
+<ParamField body="log_media" type="string" default="stdout">
+  Where logs are written. Accepted values: `file`, `stdout`, `syslog`.
+</ParamField>
+
+<ParamField body="log_level" type="string" default="info">
+  Minimum log severity. Accepted values: `trace`, `debug`, `info`, `warning`, `error`.
+</ParamField>
+
+<ParamField body="log_dir" type="string" default="/var/log/">
+  Directory where log files are written when `log_media` is `file`.
+</ParamField>
+
+<ParamField body="log_max_size" type="integer" default="20">
+  Maximum size in megabytes of a single log file before it is rotated.
+</ParamField>
+
+<ParamField body="log_max_files" type="integer" default="10">
+  Number of rotated log files to retain.
+</ParamField>
+
+<ParamField body="compress_logs" type="boolean" default="true">
+  Compress rotated log files with gzip.
+</ParamField>
+
+```yaml
+common:
+  log_media: file
+  log_level: info
+  log_dir: /var/log/
+  log_max_size: 20
+  compress_logs: true
+  log_max_files: 10
+```
+
+---
+
+## `config_paths`
+
+Defines the filesystem layout CrowdSec uses for its configuration and runtime artifacts.
+
+<ParamField body="config_dir" type="string" default="/etc/crowdsec/">
+  Root directory for all configuration files.
+</ParamField>
+
+<ParamField body="data_dir" type="string" default="/var/lib/crowdsec/data/">
+  Directory for runtime data: the SQLite database, GeoIP databases, and data files used by scenarios.
+</ParamField>
+
+<ParamField body="hub_dir" type="string" default="/etc/crowdsec/hub/">
+  Directory managed by `cscli` that stores downloaded hub items (parsers, scenarios, collections).
+</ParamField>
+
+<ParamField body="index_path" type="string" default="/etc/crowdsec/hub/.index.json">
+  Path to the hub index file used to resolve available items.
+</ParamField>
+
+<ParamField body="simulation_path" type="string" default="/etc/crowdsec/simulation.yaml">
+  Path to the simulation configuration, which controls which scenarios run without issuing real decisions.
+</ParamField>
+
+<ParamField body="notification_dir" type="string" default="/etc/crowdsec/notifications/">
+  Directory containing notification plugin configuration files (Slack, email, HTTP, etc.).
+</ParamField>
+
+<ParamField body="plugin_dir" type="string" default="/usr/local/lib/crowdsec/plugins/">
+  Directory where compiled notification plugin binaries are stored.
+</ParamField>
+
+```yaml
+config_paths:
+  config_dir: /etc/crowdsec/
+  data_dir: /var/lib/crowdsec/data/
+  simulation_path: /etc/crowdsec/simulation.yaml
+  hub_dir: /etc/crowdsec/hub/
+  index_path: /etc/crowdsec/hub/.index.json
+  notification_dir: /etc/crowdsec/notifications/
+  plugin_dir: /usr/local/lib/crowdsec/plugins/
+```
+
+---
+
+## `crowdsec_service`
+
+Controls the behavior of the CrowdSec detection agent — the component that reads logs, runs parsers, and evaluates scenarios.
+
+<ParamField body="enable" type="boolean" default="true">
+  Set to `false` to run CrowdSec in API-only mode (Local API without the detection agent).
+</ParamField>
+
+<ParamField body="acquisition_path" type="string" default="/etc/crowdsec/acquis.yaml">
+  Path to the primary log acquisition configuration file. See [acquisition](/configuration/acquisition).
+</ParamField>
+
+<ParamField body="acquisition_dir" type="string" default="/etc/crowdsec/acquis.d">
+  Directory for additional acquisition configuration files. All `.yaml` and `.yml` files in this directory are loaded automatically.
+</ParamField>
+
+<ParamField body="parser_routines" type="integer" default="1">
+  Number of parallel goroutines used to parse incoming log lines. Increase this value on high-throughput hosts.
+</ParamField>
+
+<ParamField body="buckets_routines" type="integer" default="1">
+  Number of parallel goroutines used to process scenario buckets.
+</ParamField>
+
+<ParamField body="output_routines" type="integer" default="1">
+  Number of parallel goroutines that push events to the Local API.
+</ParamField>
+
+<ParamField body="console_context_path" type="string">
+  Path to the console context file, which controls which extra fields are sent to the CrowdSec Console with each alert.
+</ParamField>
+
+```yaml
+crowdsec_service:
+  acquisition_path: /etc/crowdsec/acquis.yaml
+  acquisition_dir: /etc/crowdsec/acquis.d
+  parser_routines: 1
+```
+
+---
+
+## `cscli`
+
+Options that control the `cscli` command-line interface.
+
+<ParamField body="output" type="string" default="human">
+  Default output format. Accepted values: `human`, `json`, `raw`.
+</ParamField>
+
+<ParamField body="color" type="string" default="auto">
+  Terminal color mode. Accepted values: `auto`, `yes`, `no`.
+</ParamField>
+
+```yaml
+cscli:
+  output: human
+  color: auto
+```
+
+---
+
+## `db_config`
+
+Database configuration for the Local API. CrowdSec supports SQLite (default), MySQL, and PostgreSQL.
+
+<ParamField body="type" type="string" default="sqlite" required>
+  Database backend. Accepted values: `sqlite`, `mysql`, `postgres` (or `postgresql`/`pgx`).
+</ParamField>
+
+<ParamField body="log_level" type="string" default="info">
+  Log level for database operations.
+</ParamField>
+
+<ParamField body="max_open_conns" type="integer" default="100">
+  Maximum number of open database connections.
+</ParamField>
+
+<ParamField body="use_wal" type="boolean">
+  Enable WAL (Write-Ahead Logging) mode for SQLite. Automatically set to `true` on local filesystems and `false` on network filesystems when not explicitly configured. Do not enable WAL on network-mounted volumes.
+</ParamField>
+
+<ParamField body="decision_bulk_size" type="integer" default="1000">
+  Number of decisions written to the database in a single batch. Maximum is `2000` (SQLite limit).
+</ParamField>
+
+### SQLite
+
+```yaml
+db_config:
+  type: sqlite
+  db_path: /var/lib/crowdsec/data/crowdsec.db
+  flush:
+    max_items: 5000
+    max_age: 7d
+```
+
+### MySQL
+
+```yaml
+db_config:
+  type: mysql
+  user: crowdsec
+  password: strongpassword
+  db_name: crowdsec
+  host: 127.0.0.1
+  port: 3306
+  flush:
+    max_items: 5000
+    max_age: 7d
+```
+
+### PostgreSQL
+
+```yaml
+db_config:
+  type: pgx
+  user: crowdsec
+  password: strongpassword
+  db_name: crowdsec
+  host: 127.0.0.1
+  port: 5432
+  sslmode: require
+  flush:
+    max_items: 5000
+    max_age: 7d
+```
+
+### `db_config.flush`
+
+Controls how old data is purged from the database.
+
+<ParamField body="max_items" type="integer" default="5000">
+  Maximum number of alerts stored in the database. Older records are pruned when this limit is reached.
+</ParamField>
+
+<ParamField body="max_age" type="string" default="7d">
+  Maximum age of alert records. Accepts Go duration strings with an optional `d` suffix for days (e.g., `7d`, `24h`).
+</ParamField>
+
+---
+
+## `plugin_config`
+
+Specifies the OS user and group under which notification plugin processes run. Plugin processes are sandboxed by running as an unprivileged user.
+
+<ParamField body="user" type="string" default="nobody">
+  OS username for plugin processes.
+</ParamField>
+
+<ParamField body="group" type="string" default="nogroup">
+  OS group for plugin processes.
+</ParamField>
+
+```yaml
+plugin_config:
+  user: nobody
+  group: nogroup
+```
+
+---
+
+## `api`
+
+The `api` section has two subsections: `client` (agent → LAPI) and `server` (LAPI configuration).
+
+### `api.client`
+
+Used by the CrowdSec agent and `cscli` to communicate with the Local API.
+
+<ParamField body="credentials_path" type="string" default="/etc/crowdsec/local_api_credentials.yaml">
+  Path to the YAML file containing the LAPI URL, login, and password (or TLS certificate paths) for agent authentication.
+</ParamField>
+
+<ParamField body="insecure_skip_verify" type="boolean" default="false">
+  Skip TLS certificate verification when connecting to the LAPI. Only use in development environments.
+</ParamField>
+
+```yaml
+api:
+  client:
+    insecure_skip_verify: false
+    credentials_path: /etc/crowdsec/local_api_credentials.yaml
+```
+
+### `api.server`
+
+Configures the Local API (LAPI) server, which receives events from agents and serves decisions to bouncers.
+
+<ParamField body="enable" type="boolean" default="true">
+  Set to `false` to disable the LAPI and run CrowdSec in agent-only mode.
+</ParamField>
+
+<ParamField body="listen_uri" type="string" default="127.0.0.1:8080">
+  Address and port the LAPI listens on. Can be a Unix socket path instead, e.g., `/run/crowdsec/crowdsec.sock`.
+</ParamField>
+
+<ParamField body="log_level" type="string" default="info">
+  Log level for LAPI-specific messages.
+</ParamField>
+
+<ParamField body="profiles_path" type="string" default="/etc/crowdsec/profiles.yaml">
+  Path to the profiles configuration. See [profiles](/configuration/profiles).
+</ParamField>
+
+<ParamField body="trusted_ips" type="array">
+  List of IPs or CIDR ranges that are granted admin-level access to the LAPI without authentication. Defaults to localhost only.
+</ParamField>
+
+<ParamField body="use_forwarded_for_headers" type="boolean" default="false">
+  Trust `X-Forwarded-For` headers from reverse proxies. Enable only when CrowdSec sits behind a trusted proxy.
+</ParamField>
+
+<ParamField body="trusted_proxies" type="array">
+  List of trusted proxy IP ranges. Setting this implicitly enables `use_forwarded_for_headers`.
+</ParamField>
+
+<ParamField body="disable_remote_lapi_registration" type="boolean" default="false">
+  Prevent agents on remote hosts from registering themselves with this LAPI.
+</ParamField>
+
+#### TLS
+
+```yaml
+api:
+  server:
+    tls:
+      cert_file: /etc/crowdsec/ssl/cert.pem
+      key_file: /etc/crowdsec/ssl/key.pem
+      # ca_cert_path: /etc/crowdsec/ssl/ca.pem  # for mutual TLS
+```
+
+#### Online client (Central API)
+
+```yaml
+api:
+  server:
+    online_client:
+      credentials_path: /etc/crowdsec/online_api_credentials.yaml
+      pull:
+        community: true    # pull community block list
+        blocklists: true   # pull subscribed blocklists
+      sharing: true        # share signals with the CrowdSec network
+```
+
+#### Auto-registration
+
+Allows agents to register automatically using a shared token instead of a manual `cscli machines add` step.
+
+```yaml
+api:
+  server:
+    auto_registration:
+      enabled: true
+      token: "your-32-character-minimum-secret-token"
+      allowed_ranges:
+        - 10.0.0.0/8
+        - 192.168.0.0/16
+```
+
+---
+
+## `prometheus`
+
+CrowdSec exposes operational metrics in Prometheus format. These metrics are consumed by the CrowdSec Console and can be scraped by any Prometheus-compatible system.
+
+<ParamField body="enabled" type="boolean" default="true">
+  Enable the Prometheus metrics endpoint.
+</ParamField>
+
+<ParamField body="level" type="string" default="full">
+  Metrics detail level. Accepted values: `full`, `aggregate`. Use `aggregate` to reduce cardinality on busy installs.
+</ParamField>
+
+<ParamField body="listen_addr" type="string" default="127.0.0.1">
+  Address the Prometheus HTTP server listens on.
+</ParamField>
+
+<ParamField body="listen_port" type="integer" default="6060">
+  Port for the Prometheus HTTP server. Metrics are available at `http://<listen_addr>:<listen_port>/metrics`.
+</ParamField>
+
+```yaml
+prometheus:
+  enabled: true
+  level: full
+  listen_addr: 127.0.0.1
+  listen_port: 6060
+```
+
+---
+
+## Local overrides
+
+CrowdSec supports a patch mechanism for any configuration file. If a file named `config.yaml.local` exists in the same directory as `config.yaml`, its contents are merged on top of the base configuration. The `.local` file only needs to contain the keys you want to override.
+
+```yaml
+# /etc/crowdsec/config.yaml.local
+common:
+  log_level: debug
+```
+
+<Tip>
+Use `.local` override files to customize configuration without modifying the package-managed defaults. This makes upgrades cleaner and allows environment-specific overrides.
+</Tip>
+
+## Environment variable expansion
+
+Any string value in `config.yaml` can reference environment variables:
+
+```yaml
+db_config:
+  password: ${DB_PASSWORD}
+```
+
+Variables are expanded at startup. If a referenced variable is not set, CrowdSec exits with an error.

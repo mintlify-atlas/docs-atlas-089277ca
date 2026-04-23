@@ -1,0 +1,524 @@
+---
+title: "Log acquisition: configure data sources in CrowdSec"
+description: "Configure log acquisition in acquis.yaml and acquis.d/. Covers file, journalctl, Docker, syslog, CloudWatch, Kafka, Kinesis, Loki, S3, and wineventlog."
+---
+
+CrowdSec needs to read logs in order to detect attacks. The acquisition layer is responsible for ingesting raw log lines from one or more sources and forwarding them to the parsing pipeline. Each source is described by a YAML document in `acquis.yaml` or in a file inside the `acquis.d/` directory. Multiple source definitions in the same file are separated by `---`.
+
+The primary configuration path is set in `config.yaml` under `crowdsec_service`:
+
+```yaml
+crowdsec_service:
+  acquisition_path: /etc/crowdsec/acquis.yaml
+  acquisition_dir: /etc/crowdsec/acquis.d
+```
+
+<Tip>
+Prefer `acquis.d/` over a monolithic `acquis.yaml`. Placing one source per file in the directory makes it easier to manage, override, and version-control individual sources. CrowdSec loads all `.yaml` and `.yml` files from the directory automatically.
+</Tip>
+
+## Common fields
+
+Every acquisition block, regardless of source type, shares a set of common fields defined by `DataSourceCommonCfg`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `source` | string | **Required.** Identifies the datasource type (e.g., `file`, `docker`, `journalctl`). |
+| `labels` | map | **Required.** Tells the parser what kind of log this is. Must include at least `type`. |
+| `mode` | string | `tail` (follow, default) or `cat` (read once and exit). |
+| `name` | string | Optional human-readable label for this source, shown in metrics. |
+| `log_level` | string | Override log verbosity for this source only. |
+| `use_time_machine` | bool | Parse timestamps from log lines instead of using wall-clock time. Recommended for S3 and offline log analysis. |
+| `transform` | string | An expr-lang expression applied to each log line before parsing. |
+
+---
+
+## Source types
+
+<AccordionGroup>
+
+<Accordion title="file — Local log files">
+
+Reads log files from the local filesystem. Supports glob patterns and inotify-based file watching.
+
+**Required fields:** `filenames` (or `filename`)
+
+```yaml
+# /etc/crowdsec/acquis.d/nginx.yaml
+source: file
+filenames:
+  - /var/log/nginx/*.log
+  - /var/log/nginx/access.log
+labels:
+  type: nginx
+---
+source: file
+filenames:
+  - /var/log/auth.log
+  - /var/log/syslog
+labels:
+  type: syslog
+---
+source: file
+filename: /var/log/apache2/*.log
+labels:
+  type: apache2
+```
+
+**Options:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `filenames` | list | — | Glob patterns or exact paths. |
+| `filename` | string | — | Single file path (convenience alias). |
+| `exclude_regexps` | list | — | Regexps matched against full file paths to skip. |
+| `force_inotify` | bool | `false` | Watch the parent directory even when the file already exists, to catch rotations. |
+| `max_buffer_size` | int | system | Maximum line length in bytes before truncation. |
+| `poll_without_inotify` | bool | — | Fall back to polling when inotify is unavailable. |
+| `discovery_poll_enable` | bool | `false` | Periodically re-evaluate glob patterns to pick up new files. |
+| `discovery_poll_interval` | duration | — | How often to re-evaluate globs when `discovery_poll_enable` is `true`. |
+
+<Note>
+CrowdSec uses inotify on Linux to detect new log files and rotations. If your files are on a network filesystem (NFS, CIFS), set `poll_without_inotify: true`.
+</Note>
+
+</Accordion>
+
+<Accordion title="journalctl — systemd Journal">
+
+Reads log entries directly from the systemd journal using `journalctl`. Only available on Linux systems with systemd.
+
+**Required fields:** `journalctl_filter`
+
+```yaml
+source: journalctl
+journalctl_filter:
+  - "_SYSTEMD_UNIT=ssh.service"
+labels:
+  type: syslog
+---
+source: journalctl
+journalctl_filter:
+  - "_SYSTEMD_UNIT=nginx.service"
+labels:
+  type: nginx
+```
+
+**Options:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `journalctl_filter` | list | One or more journal match expressions passed directly to `journalctl`. |
+
+The filter expressions follow the standard journalctl field syntax. You can use any journal field:
+
+```yaml
+source: journalctl
+journalctl_filter:
+  - "_TRANSPORT=kernel"
+  - "PRIORITY=3"
+labels:
+  type: kernel
+```
+
+</Accordion>
+
+<Accordion title="docker — Docker container logs">
+
+Streams logs from running Docker containers or Docker Swarm services. The datasource subscribes to container events and automatically follows new containers as they start.
+
+**Required fields:** at least one of `container_name`, `container_id`, `container_name_regexp`, `container_id_regexp`, or `use_container_labels`.
+
+```yaml
+source: docker
+container_name:
+  - nginx
+  - my-app
+labels:
+  type: nginx
+---
+source: docker
+container_name_regexp:
+  - "^web-.*"
+follow_stdout: true
+follow_stderr: false
+labels:
+  type: app-logs
+```
+
+**Options:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `container_name` | list | — | Exact container names to follow. |
+| `container_id` | list | — | Exact container IDs to follow. |
+| `container_name_regexp` | list | — | Regexps matched against container names. |
+| `container_id_regexp` | list | — | Regexps matched against container IDs. |
+| `service_name` | list | — | Docker Swarm service names (manager node only). |
+| `service_name_regexp` | list | — | Regexps matched against Swarm service names. |
+| `use_container_labels` | bool | `false` | Use Docker labels on the container to derive the `labels` map. Mutually exclusive with name/id filters. |
+| `use_service_labels` | bool | `false` | Use Docker labels on Swarm services to derive labels. |
+| `follow_stdout` | bool | `true` | Include stdout output. |
+| `follow_stderr` | bool | `true` | Include stderr output. |
+| `docker_host` | string | env | Override the Docker socket/host (e.g., `tcp://remote:2376`). |
+| `since` | string | now | Collect logs starting from this timestamp (RFC3339). |
+
+<Warning>
+`use_container_labels` and explicit name/ID filters are mutually exclusive. Mixing them causes a configuration error.
+</Warning>
+
+</Accordion>
+
+<Accordion title="syslog — UDP/TCP syslog receiver">
+
+Starts an embedded syslog server that receives messages over UDP or TCP. Useful when devices (routers, firewalls, IoT) send syslog directly to the machine running CrowdSec.
+
+```yaml
+source: syslog
+listen_addr: 127.0.0.1
+listen_port: 514
+protocol: udp
+labels:
+  type: syslog
+```
+
+**Options:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `listen_addr` | string | `127.0.0.1` | IP address to bind the syslog listener. |
+| `listen_port` | int | `514` | UDP/TCP port to listen on. |
+| `protocol` | string | `udp` | Transport protocol: `udp` or `tcp`. |
+| `max_message_len` | int | `2048` | Maximum syslog message length in bytes. |
+| `disable_rfc_parser` | bool | `false` | Skip RFC 3164/5424 header parsing and just strip the PRI field. |
+
+<Note>
+Binding to port 514 typically requires root privileges or a `CAP_NET_BIND_SERVICE` capability. Consider using a higher port (e.g., 5140) and redirecting traffic with iptables.
+</Note>
+
+</Accordion>
+
+<Accordion title="cloudwatch — AWS CloudWatch Logs">
+
+Polls one or more CloudWatch log streams within a log group. Supports both stream name filtering and periodic discovery of new streams.
+
+```yaml
+source: cloudwatch
+group_name: /aws/ec2/my-application
+stream_regexp: "^production-"
+aws_region: us-east-1
+labels:
+  type: nginx
+```
+
+**Options:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `group_name` | string | **Required.** CloudWatch log group name. |
+| `stream_name` | string | Exact stream name to monitor. |
+| `stream_regexp` | string | Regexp to filter streams by name. Mutually exclusive with `stream_name`. |
+| `aws_region` | string | AWS region (required if `aws_config_dir` is not set). |
+| `aws_profile` | string | AWS credentials profile name. |
+| `aws_config_dir` | string | Directory containing AWS `config` and `credentials` files. |
+| `prepend_cloudwatch_timestamp` | bool | Prepend the CloudWatch event timestamp to each log line. |
+| `poll_new_stream_interval` | duration | How often to discover new streams in the group. |
+| `poll_stream_interval` | duration | How often to poll each stream for new events. |
+| `max_stream_age` | duration | Ignore streams that haven't received events within this duration. |
+| `stream_read_timeout` | duration | Stop monitoring a stream after this period of inactivity. |
+
+AWS credentials are resolved using the standard AWS SDK chain: environment variables → `~/.aws/credentials` → IAM instance role.
+
+</Accordion>
+
+<Accordion title="kafka — Apache Kafka consumer">
+
+Consumes log messages from a Kafka topic. Supports consumer groups, TLS, and batch tuning.
+
+```yaml
+source: kafka
+brokers:
+  - 10.0.0.1:9092
+  - 10.0.0.2:9092
+topic: crowdsec-logs
+group_id: crowdsec-consumer
+labels:
+  type: nginx
+```
+
+**With TLS:**
+
+```yaml
+source: kafka
+brokers:
+  - kafka.internal:9093
+topic: crowdsec-logs
+tls:
+  ca_cert: /etc/crowdsec/kafka/ca.pem
+  client_cert: /etc/crowdsec/kafka/client.pem
+  client_key: /etc/crowdsec/kafka/client.key
+labels:
+  type: app
+```
+
+**Options:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `brokers` | list | **Required.** Kafka broker addresses (`host:port`). |
+| `topic` | string | **Required.** Kafka topic to consume. |
+| `group_id` | string | Consumer group ID. If not set, reads only the first partition. |
+| `partition` | int | Specific partition number. Mutually exclusive with `group_id`. |
+| `timeout` | string | Connection timeout in seconds. |
+| `tls.ca_cert` | string | CA certificate path. |
+| `tls.client_cert` | string | Client certificate path. |
+| `tls.client_key` | string | Client private key path. |
+| `tls.insecure_skip_verify` | bool | Skip TLS certificate verification. |
+| `batch.min_bytes` | int | Minimum bytes to fetch per request. |
+| `batch.max_bytes` | int | Maximum bytes to fetch per request. |
+| `batch.max_wait` | duration | Maximum time to wait for `min_bytes` before fetching. |
+| `batch.commit_interval` | duration | Frequency at which offsets are committed. |
+
+</Accordion>
+
+<Accordion title="kinesis — AWS Kinesis Data Streams">
+
+Reads records from an AWS Kinesis Data Stream, with optional Enhanced Fan-Out mode for dedicated throughput.
+
+**Standard mode (GetRecords):**
+
+```yaml
+source: kinesis
+stream_name: my-log-stream
+aws_region: us-east-1
+labels:
+  type: nginx
+```
+
+**Enhanced Fan-Out mode (SubscribeToShard):**
+
+```yaml
+source: kinesis
+stream_arn: arn:aws:kinesis:us-east-1:123456789012:stream/my-log-stream
+use_enhanced_fanout: true
+consumer_name: crowdsec-consumer
+aws_region: us-east-1
+labels:
+  type: app
+```
+
+**Options:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `stream_name` | string | Kinesis stream name. Required when `use_enhanced_fanout` is `false`. |
+| `stream_arn` | string | Kinesis stream ARN. Required when `use_enhanced_fanout` is `true`. |
+| `use_enhanced_fanout` | bool | Use Enhanced Fan-Out (dedicated 2 MB/s throughput per consumer). |
+| `consumer_name` | string | Consumer name for Enhanced Fan-Out. Required when enhanced fan-out is enabled. |
+| `aws_region` | string | AWS region. |
+| `aws_profile` | string | AWS credentials profile. |
+| `aws_endpoint` | string | Custom endpoint URL (for localstack/testing). |
+| `max_retries` | int | Maximum retry attempts on transient errors (default: 10). |
+| `from_subscription` | bool | Read from an existing subscription rather than creating a new one. |
+
+</Accordion>
+
+<Accordion title="loki — Grafana Loki">
+
+Connects to a Loki instance and tails a LogQL query in real time, or queries a historical range in `cat` mode.
+
+```yaml
+source: loki
+url: http://localhost:3100
+query: '{job="nginx"}'
+labels:
+  type: nginx
+---
+source: loki
+url: https://loki.internal
+query: '{app="api-server"} |= "error"'
+auth:
+  username: admin
+  password: secret
+wait_for_ready: 30s
+labels:
+  type: app
+```
+
+**Options:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `url` | string | — | **Required.** Loki base URL. |
+| `query` | string | — | **Required.** LogQL stream selector expression. |
+| `prefix` | string | `/` | HTTP path prefix for the Loki API. |
+| `limit` | int | `100` | Maximum log entries fetched per request. |
+| `since` | duration | — | In `cat` mode, look back this duration from now. |
+| `delay_for` | duration | `0s` | Delay (1–5 s) to allow Loki ingestion to settle before querying. |
+| `wait_for_ready` | duration | `10s` | Retry interval while waiting for Loki's `/ready` endpoint. |
+| `no_ready_check` | bool | `false` | Skip the `/ready` health check on startup. |
+| `max_failure_duration` | duration | `30s` | Stop the source after this period of consecutive failures. |
+| `auth.username` | string | — | HTTP Basic auth username. |
+| `auth.password` | string | — | HTTP Basic auth password. |
+| `headers` | map | — | Additional HTTP headers (e.g., `X-Scope-OrgID` for multi-tenant Loki). |
+
+</Accordion>
+
+<Accordion title="s3 — AWS S3">
+
+Reads log files from an S3 bucket. Supports two polling strategies: periodic list-based polling, or event-driven via SQS notifications.
+
+<Warning>
+Always set `use_time_machine: true` for S3 sources. Log files land in S3 minutes or hours after the events occurred, so wall-clock time would produce incorrect bucket assignments.
+</Warning>
+
+**SQS-driven (recommended):**
+
+```yaml
+source: s3
+polling_method: sqs
+sqs_name: crowdsec-s3-events
+aws_region: us-east-1
+use_time_machine: true
+labels:
+  type: nginx
+```
+
+**List-based polling:**
+
+```yaml
+source: s3
+polling_method: list
+bucket_name: my-access-logs
+prefix: nginx/
+polling_interval: 60
+aws_region: us-east-1
+use_time_machine: true
+labels:
+  type: nginx
+```
+
+**Options:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `bucket_name` | string | — | S3 bucket name. Required for `list` polling. Mutually exclusive with `sqs_name`. |
+| `prefix` | string | — | Key prefix to filter objects within the bucket. |
+| `polling_method` | string | `list` | `list` or `sqs`. SQS is strongly recommended for production. |
+| `polling_interval` | int | `60` | Seconds between list scans (list method only). |
+| `sqs_name` | string | — | SQS queue name. Required for `sqs` polling. |
+| `sqs_format` | string | — | SQS message format: `s3_notification`, `eventbridge`, or `sns`. |
+| `aws_region` | string | — | AWS region. |
+| `aws_profile` | string | — | AWS credentials profile. |
+| `aws_endpoint` | string | — | Custom endpoint URL. |
+| `max_buffer_size` | int | system | Maximum line length when reading compressed/large log files. |
+
+</Accordion>
+
+<Accordion title="k8s-audit — Kubernetes Audit Logs">
+
+Receives Kubernetes audit events by acting as a webhook backend. Configure your cluster's API server to send audit events to the CrowdSec endpoint.
+
+```yaml
+source: k8s-audit
+listen_addr: 0.0.0.0
+listen_port: 9090
+webhook_path: /k8s-audit
+labels:
+  type: k8s-audit
+```
+
+**Options:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `listen_addr` | string | **Required.** IP address to bind the webhook HTTP server. |
+| `listen_port` | int | **Required.** Port to bind. |
+| `webhook_path` | string | **Required.** URL path that receives `POST` requests from the Kubernetes API server. |
+
+Configure the Kubernetes audit policy to forward events to `http://<crowdsec-host>:<listen_port><webhook_path>`. CrowdSec handles both HTTP/1.1 and HTTP/2.
+
+</Accordion>
+
+<Accordion title="wineventlog — Windows Event Log">
+
+Reads events from the Windows Event Log. Available only on Windows. Supports filtering by event channel, event level, and event IDs.
+
+```yaml
+source: wineventlog
+event_channel: Security
+event_level: Warning
+event_ids:
+  - 4625
+  - 4648
+labels:
+  type: windows
+```
+
+**Using a custom XPath query:**
+
+```yaml
+source: wineventlog
+xpath_query: |
+  <QueryList>
+    <Query Id="0" Path="Security">
+      <Select Path="Security">*[System[(EventID=4625)]]</Select>
+    </Query>
+  </QueryList>
+labels:
+  type: windows
+```
+
+**Options:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `event_channel` | string | Windows Event Log channel name (e.g., `Security`, `Application`, `System`). Mutually exclusive with `xpath_query`. |
+| `event_level` | string | Filter by severity: `Critical`, `Error`, `Warning`, `Information`, `Verbose`. |
+| `event_ids` | list | Filter by specific event IDs. |
+| `xpath_query` | string | Raw XPath query string. Mutually exclusive with `event_channel`. |
+| `pretty_name` | string | Display name for this source in metrics and logs. |
+
+</Accordion>
+
+</AccordionGroup>
+
+---
+
+## Using `acquis.d/` for modular configuration
+
+Rather than maintaining a single large `acquis.yaml`, place separate files in `/etc/crowdsec/acquis.d/`:
+
+```
+/etc/crowdsec/acquis.d/
+├── nginx.yaml
+├── sshd.yaml
+├── docker-web.yaml
+└── cloudwatch-prod.yaml
+```
+
+Each file follows the same format as `acquis.yaml`. CrowdSec loads all files matching `*.yaml` and `*.yml` in the directory, in filesystem order. Files in `acquis.d/` are merged with the primary `acquis.yaml` — both can be active at the same time.
+
+## Multi-document files
+
+A single YAML file can contain multiple source definitions separated by `---`:
+
+```yaml
+source: file
+filenames:
+  - /var/log/nginx/access.log
+labels:
+  type: nginx
+---
+source: file
+filenames:
+  - /var/log/nginx/error.log
+labels:
+  type: nginx
+---
+source: journalctl
+journalctl_filter:
+  - "_SYSTEMD_UNIT=nginx.service"
+labels:
+  type: nginx
+```

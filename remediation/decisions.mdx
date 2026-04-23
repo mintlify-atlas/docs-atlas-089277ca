@@ -1,0 +1,175 @@
+---
+title: "Decisions: list, add, and delete CrowdSec ban actions"
+description: "Learn how CrowdSec decisions are generated from alerts via profiles, and how to list, add, delete, and bulk-import decisions using cscli commands."
+---
+
+A decision is the actionable output of CrowdSec's detection pipeline. When a scenario threshold is exceeded, the engine raises an alert. That alert passes through one or more profiles defined in `profiles.yaml`, and each matching profile emits a decision — a structured record that tells bouncers what to do with the offending source. Bouncers then enforce those decisions at the firewall, reverse proxy, or application layer.
+
+## Decision lifecycle
+
+<Steps>
+  <Step title="Alert raised">
+    A scenario bucket overflows (for example, `crowdsecurity/ssh-bf` fires after too many failed SSH logins). The engine creates an alert containing source information — IP address, scope, scenario name, and event count.
+  </Step>
+  <Step title="Profile evaluation">
+    The alert is evaluated against each profile in `profiles.yaml` in order. A profile matches when its `filters` expression returns `true`. The default profile matches any alert with remediation enabled and scope `Ip`:
+
+    ```yaml
+    name: default_ip_remediation
+    filters:
+      - Alert.Remediation == true && Alert.GetScope() == "Ip"
+    decisions:
+      - type: ban
+        duration: 4h
+    on_success: break
+    ```
+  </Step>
+  <Step title="Decision created">
+    The matching profile generates a decision. The decision inherits the `type`, `duration`, and (optionally) `scope` from the profile, and the `value` (the IP or range) from the alert source. The decision is written to the LAPI database and immediately available to bouncers.
+  </Step>
+  <Step title="Bouncer enforcement">
+    Bouncers polling `/v1/decisions/stream` receive the new decision in the `new` array and apply the appropriate enforcement action — firewall block, HTTP 403, CAPTCHA, and so on.
+  </Step>
+  <Step title="Decision expiry">
+    When the decision's `duration` elapses, LAPI moves it to the expired state. The next bouncer poll includes the decision ID in the `deleted` array, and bouncers remove the corresponding rule.
+  </Step>
+</Steps>
+
+## Decision fields
+
+| Field | Description | Example |
+|---|---|---|
+| `value` | The target being acted on | `1.2.3.4`, `1.2.3.0/24`, `alice` |
+| `scope` | The dimension of `value` | `Ip`, `Range`, `Username`, `Session` |
+| `type` | The remediation action | `ban`, `captcha`, `throttle` |
+| `duration` | How long the decision is active | `4h`, `24h`, `30m` |
+| `scenario` | The scenario that triggered the alert | `crowdsecurity/ssh-bf` |
+| `origin` | Who created the decision | `crowdsec`, `cscli`, `lists`, `CAPI` |
+
+## Listing decisions
+
+```bash
+# List all active decisions (up to 100 by default)
+sudo cscli decisions list
+
+# Filter by IP
+sudo cscli decisions list --ip 1.2.3.4
+
+# Filter by CIDR range
+sudo cscli decisions list --range 1.2.3.0/24
+
+# Filter by scenario
+sudo cscli decisions list --scenario crowdsecurity/ssh-bf
+
+# Include decisions from the Central API community blocklist
+sudo cscli decisions list --all
+
+# Output as JSON
+sudo cscli decisions list -o json
+```
+
+The `--all` flag includes decisions from the CrowdSec Central API (community blocklist). By default only local decisions are shown.
+
+## Adding a decision manually
+
+You can create decisions by hand without needing a scenario to fire. This is useful for blocking a known-bad IP immediately or testing bouncer behavior.
+
+```bash
+# Ban an IP for the default duration (4 hours)
+sudo cscli decisions add --ip 1.2.3.4
+
+# Ban a CIDR range for 24 hours
+sudo cscli decisions add --range 1.2.3.0/24 --duration 24h
+
+# Issue a captcha decision for a specific IP
+sudo cscli decisions add --ip 1.2.3.4 --type captcha --duration 1h
+
+# Ban with a custom reason
+sudo cscli decisions add --ip 1.2.3.4 --reason "known scanner"
+
+# Decision on a non-IP scope
+sudo cscli decisions add --scope username --value alice --type ban
+```
+
+<Note>
+  If the IP or range you are trying to ban is on an allowlist, `cscli` will refuse to create the decision and show which allowlist entry is protecting it. Use `--bypass-allowlist` to override.
+</Note>
+
+## Deleting decisions
+
+Deleting a decision expires it immediately. Bouncers receive the removed decision on their next poll.
+
+```bash
+# Delete by IP
+sudo cscli decisions delete --ip 1.2.3.4
+
+# Delete by CIDR range
+sudo cscli decisions delete --range 1.2.3.0/24
+
+# Delete a specific decision by numeric ID
+sudo cscli decisions delete --id 42
+
+# Delete all captcha-type decisions
+sudo cscli decisions delete --type captcha
+
+# Delete all decisions from a specific scenario
+sudo cscli decisions delete --scenario crowdsecurity/ssh-bf
+
+# Delete everything (use with caution)
+sudo cscli decisions delete --all
+```
+
+<Warning>
+  `cscli decisions delete --all` removes every active decision from LAPI, including those received from the Central API community blocklist. Bouncers will stop enforcing all blocks immediately after their next poll.
+</Warning>
+
+## Importing decisions in bulk
+
+`cscli decisions import` lets you load a list of decisions from a file or standard input. Accepted formats are JSON, CSV, and a plain values list (one IP per line).
+
+```bash
+# Import from a CSV file (extension is detected automatically)
+sudo cscli decisions import --input decisions.csv
+
+# Import from a JSON file
+sudo cscli decisions import --input decisions.json
+
+# Pipe raw IPs from stdin
+echo "1.2.3.4" | sudo cscli decisions import --input - --format values
+
+# Override defaults for all imported decisions
+sudo cscli decisions import --input decisions.csv --duration 24h --type captcha
+```
+
+**CSV format** — any subset of columns, with a header row:
+
+```
+duration,scope,type,value
+24h,Ip,ban,1.2.3.4
+12h,Ip,captcha,5.6.7.8
+```
+
+**JSON format** — an array of decision objects:
+
+```json
+[
+  {"value": "1.2.3.4", "duration": "24h", "type": "ban", "scope": "Ip"},
+  {"value": "5.6.7.8", "duration": "12h", "type": "captcha", "scope": "Ip"}
+]
+```
+
+Fields omitted in the input fall back to the defaults set by `--duration`, `--type`, `--scope`, and `--reason` flags (which themselves default to `4h`, `ban`, `Ip`, and `manual`). IPs or ranges on allowlists are skipped automatically.
+
+## Decision expiry
+
+Decisions are time-limited. The `duration` field is evaluated from the moment the decision is created. Once a decision expires:
+
+1. LAPI marks it as expired in the database.
+2. The next bouncer delta poll receives it in the `deleted` array.
+3. The bouncer removes the associated enforcement rule.
+
+Decisions are not permanently deleted — they are retained as historical records attached to their parent alerts. You can still see them in `cscli alerts list` after they expire.
+
+<Tip>
+  Use `duration_expr` in a profile for dynamic durations. For example, `Sprintf('%dh', (GetDecisionsCount(Alert.GetValue()) + 1) * 4)` doubles the ban duration for each previous offense from the same source.
+</Tip>

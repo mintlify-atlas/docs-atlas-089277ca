@@ -1,0 +1,132 @@
+---
+title: "Bouncers: enforce CrowdSec ban decisions at the edge"
+description: "Bouncers consume decisions from the CrowdSec LAPI and enforce bans at the firewall, reverse proxy, or application layer. Learn to register and use them."
+---
+
+Bouncers are the enforcement layer of CrowdSec. While the security engine detects threats and produces decisions, bouncers act on those decisions — dropping packets, returning HTTP 403s, serving CAPTCHA challenges, or applying rate limits. Each bouncer authenticates to the Local API (LAPI) with an API key and polls the `/v1/decisions/stream` endpoint to receive a live feed of new and expired decisions.
+
+## How bouncers work
+
+When a bouncer starts, it calls `GET /v1/decisions/stream?startup=true` to fetch the full set of active decisions from LAPI. On subsequent polls it sends the same request without `startup=true` to receive only deltas: new decisions added since the last pull and decisions that have since expired. The LAPI response has the shape:
+
+```json
+{
+  "new": [
+    {
+      "id": 42,
+      "value": "1.2.3.4",
+      "type": "ban",
+      "scope": "Ip",
+      "duration": "3h59m52s",
+      "scenario": "crowdsecurity/ssh-bf",
+      "origin": "crowdsec"
+    }
+  ],
+  "deleted": []
+}
+```
+
+Bouncers apply the decisions using whatever enforcement mechanism is native to the component — `nftables`/`iptables` rules for the firewall bouncer, Nginx `deny` directives for the web server bouncer, and so on.
+
+## Popular bouncer types
+
+<CardGroup cols={2}>
+  <Card title="cs-firewall-bouncer" icon="shield" href="https://github.com/crowdsecurity/cs-firewall-bouncer">
+    Blocks IPs at the kernel level using `nftables` or `iptables`. The most efficient option for general-purpose IP banning on Linux hosts.
+  </Card>
+  <Card title="cs-nginx-bouncer" icon="server" href="https://github.com/crowdsecurity/cs-nginx-bouncer">
+    Integrates as a Lua module in Nginx. Supports both ban and CAPTCHA decision types, checking incoming requests against the LAPI decision stream.
+  </Card>
+  <Card title="cs-traefik-bouncer" icon="arrow-right-arrow-left" href="https://github.com/crowdsecurity/cs-traefik-bouncer">
+    A Traefik middleware plugin that queries the LAPI on each request. Works as a ForwardAuth service or native Traefik plugin.
+  </Card>
+  <Card title="cs-haproxy-bouncer" icon="network-wired" href="https://github.com/crowdsecurity/cs-haproxy-bouncer">
+    A Lua script for HAProxy that checks every connection against the active CrowdSec decision list.
+  </Card>
+  <Card title="cs-wordpress-bouncer" icon="wordpress" href="https://github.com/crowdsecurity/cs-wordpress-bouncer">
+    A WordPress plugin that blocks or challenges visitors based on CrowdSec decisions, with built-in CAPTCHA support.
+  </Card>
+  <Card title="More on the Hub" icon="store" href="https://hub.crowdsec.net/browse/#bouncers">
+    The CrowdSec Hub lists all community and official bouncers, including integrations for Cloudflare, AWS WAF, ModSecurity, and more.
+  </Card>
+</CardGroup>
+
+## Registering a bouncer
+
+Every bouncer must be registered with LAPI before it can authenticate. Registration generates a 32-byte API key stored as a SHA-512 hash in the CrowdSec database. The plaintext key is shown only once.
+
+<Steps>
+  <Step title="Register the bouncer">
+    Run `cscli bouncers add` on the machine running LAPI. Replace `my-bouncer` with a meaningful name for the component you are registering.
+
+    ```bash
+    sudo cscli bouncers add my-bouncer
+    ```
+
+    The output shows the generated API key:
+
+    ```
+    API key for 'my-bouncer':
+
+       a1b2c3d4e5f6...
+
+    Please keep this key since you will not be able to retrieve it!
+    ```
+
+    You can also supply your own key with `--key`:
+
+    ```bash
+    sudo cscli bouncers add my-bouncer --key <your-key>
+    ```
+  </Step>
+  <Step title="Configure the bouncer">
+    Place the API key in the bouncer's configuration file. The exact field name varies by bouncer, but a typical configuration looks like:
+
+    ```yaml
+    api_url: http://127.0.0.1:8080
+    api_key: a1b2c3d4e5f6...
+    ```
+
+    Point `api_url` at your LAPI endpoint. For remote bouncers, replace `127.0.0.1` with the LAPI host.
+  </Step>
+  <Step title="Start the bouncer">
+    Start the bouncer service. It will authenticate to LAPI, fetch the current decision list, and begin enforcing decisions.
+
+    ```bash
+    sudo systemctl enable --now cs-firewall-bouncer
+    ```
+  </Step>
+  <Step title="Verify registration">
+    Confirm the bouncer is active and pulling decisions:
+
+    ```bash
+    sudo cscli bouncers list
+    ```
+
+    A healthy bouncer shows a recent **Last API pull** timestamp and **Valid** status.
+  </Step>
+</Steps>
+
+## Managing registered bouncers
+
+```bash
+# List all registered bouncers
+sudo cscli bouncers list
+
+# Remove a bouncer (revokes its API key)
+sudo cscli bouncers delete my-bouncer
+```
+
+<Note>
+  The `cscli bouncers` commands require direct database access and must be run on the LAPI host (or with access to the CrowdSec database). They cannot be run from a remote agent.
+</Note>
+
+## Authentication and security
+
+Bouncers authenticate using the `X-Api-Key` HTTP header on every request to LAPI. The LAPI validates the key against the SHA-512 hash stored in its database. If a bouncer's key is compromised, delete the registration with `cscli bouncers delete` and create a new one — the old key immediately stops working.
+
+TLS mutual authentication is also supported for environments where API key rotation is operationally difficult. See the CrowdSec documentation on TLS auth for setup details.
+
+<Tip>
+  If you are running multiple bouncer instances (for example, a fleet of Nginx nodes), register each instance separately with a unique name. This lets you track individual pull activity and revoke access per instance.
+</Tip>
